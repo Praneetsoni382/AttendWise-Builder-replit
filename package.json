@@ -1,19 +1,33 @@
 {
-  "name": "workspace",
+  "name": "attendwise",
   "version": "0.0.0",
   "license": "MIT",
-  "scripts": {
-    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
-    "build": "pnpm run typecheck && pnpm -r --if-present run build",
-    "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
-  },
   "private": true,
+  "type": "module",
+  "workspaces": [
+    "artifacts/*",
+    "lib/*",
+    "scripts"
+  ],
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build --config artifacts/attendwise/vite.config.ts",
+    "start": "tsx server.ts",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
   "dependencies": {
-    "@replit/connectors-sdk": "^0.4.3"
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "firebase": "^13.0.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.3.3",
     "prettier": "^3.9.6",
-    "typescript": "~5.9.3"
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.2"
   }
 }

@@ -1,4 +1,5 @@
-@import "@workspace/attendwise-design-system/styles.css";
+@import "../../attendwise-design-system/src/index.css";
+@source "./";
 
 html {
   min-width: 320px;
