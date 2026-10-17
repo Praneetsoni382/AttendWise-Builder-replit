@@ -413,6 +413,7 @@ function Shell({
   const [mobileNav, setMobileNav] = useState(false);
   const navItems = [
     { href: "/dashboard", title: "Dashboard", icon: LayoutDashboard },
+    { href: "/analytics", title: "Analytics", icon: Activity },
     { href: "/timetable", title: "My Timetable", icon: CalendarDays },
     { href: "/calendar", title: "Academic Calendar", icon: CalendarRange },
     { href: "/history", title: "Attendance History", icon: Activity },
@@ -3335,6 +3336,337 @@ function Comparison({
           detail="Once sessions pass their scheduled interval and attendance is recorded, they will appear here for manual ERP comparison."
         />
       )}
+
+      <AttendanceCardDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        session={selectedSession}
+        user={user}
+        onRecordErp={onRecordErp}
+        onFreezeClass={async (sid) => {
+          if (onFreezeClass) {
+            await onFreezeClass(sid);
+          }
+          setSelectedSession((prev) =>
+            prev && prev.id === sid
+              ? {
+                  ...prev,
+                  personalStatus: "frozen",
+                  finalized: true,
+                  frozenAt: new Date().toISOString(),
+                  finalizedAt: new Date().toISOString(),
+                }
+              : prev
+          );
+        }}
+      />
+    </>
+  );
+}
+
+// Dedicated Analytics Page View
+function AnalyticsPage({
+  user,
+  sessions,
+  subjects,
+  onRecordErp,
+  onFreezeClass,
+}: {
+  user: FirebaseUser;
+  sessions: ClassSessionItem[];
+  subjects: SubjectItem[];
+  onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
+  onFreezeClass?: (sessionId: string) => Promise<void>;
+}) {
+  const [selectedSession, setSelectedSession] = useState<ClassSessionItem | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [subjectFilter, setSubjectFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+
+  const stats = useMemo(() => computeAttendanceStats(sessions), [sessions]);
+
+  // Filtered subjects breakdown
+  const filteredSubjects = useMemo(() => {
+    return subjects.filter((sub) => {
+      if (subjectFilter !== "all" && sub.id !== subjectFilter) return false;
+      if (categoryFilter !== "all" && sub.category !== categoryFilter) return false;
+      return true;
+    });
+  }, [subjects, subjectFilter, categoryFilter]);
+
+  const frozenSessionsCount = sessions.filter((s) => s.personalStatus === "frozen").length;
+  const cancelledSessionsCount = sessions.filter((s) => s.personalStatus === "cancelled").length;
+  const upcomingSessionsCount = sessions.filter((s) => !s.finalized && s.personalStatus === "upcoming").length;
+
+  return (
+    <>
+      <PageHeading
+        title="Attendance Analytics"
+        description="Real-time authoritative statistics, semester-to-date metrics, and comparison between AttendWise and College ERP."
+      />
+
+      {/* Top Two Prominent Percentage Cards */}
+      <div className="grid gap-6 md:grid-cols-2 mb-8">
+        {/* Card A: AttendWise Attendance */}
+        <Card className="border-primary/30 shadow-sm relative overflow-hidden bg-gradient-to-br from-card to-primary/5">
+          <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-base font-bold flex items-center gap-2">
+                <CheckCircle2 className="h-5 w-5 text-primary" /> My AttendWise Attendance
+              </CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">Authoritative personal verified record</p>
+            </div>
+            <Badge variant="outline" className="font-mono text-xs font-semibold px-2.5 py-1">
+              {stats.overall.percentage !== null ? `${stats.overall.percentage}%` : "N/A"}
+            </Badge>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-baseline justify-between">
+              <span className="text-4xl font-extrabold tracking-tight">
+                {stats.overall.percentage !== null ? `${stats.overall.percentage}%` : "N/A"}
+              </span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Target: 75% Required
+              </span>
+            </div>
+
+            {stats.overall.percentage !== null ? (
+              <Progress value={stats.overall.percentage} className="h-2.5" aria-label="AttendWise attendance percentage" />
+            ) : null}
+
+            <div className="grid grid-cols-3 gap-2 pt-2 text-center text-xs">
+              <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
+                <p className="font-bold text-emerald-700 dark:text-emerald-400 text-sm">{stats.overall.presentCount}</p>
+                <p className="text-[11px] text-muted-foreground">Present</p>
+              </div>
+              <div className="rounded-lg bg-rose-500/10 p-2.5 border border-rose-500/20">
+                <p className="font-bold text-rose-700 dark:text-rose-400 text-sm">{stats.overall.absentCount}</p>
+                <p className="text-[11px] text-muted-foreground">Absent</p>
+              </div>
+              <div className="rounded-lg bg-muted/50 p-2.5 border">
+                <p className="font-bold text-foreground text-sm">{stats.overall.totalEligible}</p>
+                <p className="text-[11px] text-muted-foreground">Eligible Total</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Card B: College ERP Attendance */}
+        <Card className="border-chart-2/30 shadow-sm relative overflow-hidden bg-gradient-to-br from-card to-secondary/5">
+          <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-base font-bold flex items-center gap-2">
+                <TableProperties className="h-5 w-5 text-secondary-foreground" /> My College ERP Attendance
+              </CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">Corrected denominator across all eligible classes</p>
+            </div>
+            <Badge variant="outline" className="font-mono text-xs font-semibold px-2.5 py-1">
+              {stats.erp.percentage !== null ? `${stats.erp.percentage}%` : "N/A"}
+            </Badge>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-baseline justify-between">
+              <span className="text-4xl font-extrabold tracking-tight">
+                {stats.erp.percentage !== null ? `${stats.erp.percentage}%` : "N/A"}
+              </span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Same Shared Denominator
+              </span>
+            </div>
+
+            {stats.erp.percentage !== null ? (
+              <Progress value={stats.erp.percentage} className="h-2.5" aria-label="ERP attendance percentage" />
+            ) : null}
+
+            <div className="grid grid-cols-3 gap-2 pt-2 text-center text-xs">
+              <div className="rounded-lg bg-emerald-500/10 p-2.5 border border-emerald-500/20">
+                <p className="font-bold text-emerald-700 dark:text-emerald-400 text-sm">{stats.erp.presentCount}</p>
+                <p className="text-[11px] text-muted-foreground">ERP Present</p>
+              </div>
+              <div className="rounded-lg bg-rose-500/10 p-2.5 border border-rose-500/20">
+                <p className="font-bold text-rose-700 dark:text-rose-400 text-sm">{stats.erp.absentCount}</p>
+                <p className="text-[11px] text-muted-foreground">ERP Absent</p>
+              </div>
+              <div className="rounded-lg bg-amber-500/10 p-2.5 border border-amber-500/20">
+                <p className="font-bold text-amber-700 dark:text-amber-400 text-sm">{stats.erpNotEnteredCount}</p>
+                <p className="text-[11px] text-muted-foreground">Not Entered</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Semester-to-Date Overview & Metrics */}
+      <Card className="mb-8 shadow-xs">
+        <CardHeader>
+          <CardTitle className="text-base font-bold">Semester-to-Date Overview</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Aggregated statistics for all finalized completed sessions up to current trusted server time in IST.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+            <div className="rounded-xl border bg-muted/30 p-3.5 space-y-1">
+              <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">Eligible Completed</span>
+              <p className="text-2xl font-bold text-foreground">{stats.totalFinalized}</p>
+              <p className="text-[10px] text-muted-foreground">Included in denominator</p>
+            </div>
+            <div className="rounded-xl border bg-sky-500/10 border-sky-500/20 p-3.5 space-y-1">
+              <span className="text-sky-800 dark:text-sky-300 text-[11px] font-medium uppercase tracking-wider">Frozen (Excluded)</span>
+              <p className="text-2xl font-bold text-sky-900 dark:text-sky-200">{frozenSessionsCount}</p>
+              <p className="text-[10px] text-sky-700/80 dark:text-sky-400">Permanently cancelled</p>
+            </div>
+            <div className="rounded-xl border bg-muted/30 p-3.5 space-y-1">
+              <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">Cancelled</span>
+              <p className="text-2xl font-bold text-foreground">{cancelledSessionsCount}</p>
+              <p className="text-[10px] text-muted-foreground">Excluded from totals</p>
+            </div>
+            <div className="rounded-xl border bg-muted/30 p-3.5 space-y-1">
+              <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">Upcoming / In-Run</span>
+              <p className="text-2xl font-bold text-foreground">{upcomingSessionsCount}</p>
+              <p className="text-[10px] text-muted-foreground">Awaiting eligibility</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Subject-Wise Analytics Breakdown */}
+      <Card className="mb-8 shadow-xs">
+        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <CardTitle className="text-base font-bold">Subject-Wise Analytics Breakdown</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              Detailed attendance breakdown for each subject using the shared eligible class denominator.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+              <SelectTrigger className="h-8 text-xs w-32">
+                <SelectValue placeholder="Category" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Categories</SelectItem>
+                <SelectItem value="Theory">Theory</SelectItem>
+                <SelectItem value="Practical">Practical</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={subjectFilter} onValueChange={setSubjectFilter}>
+              <SelectTrigger className="h-8 text-xs w-44">
+                <SelectValue placeholder="Subject" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Subjects</SelectItem>
+                {subjects.map((sub) => (
+                  <SelectItem key={sub.id} value={sub.id}>
+                    {sub.code} — {sub.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {filteredSubjects.map((sub) => {
+              const subSessions = sessions.filter(
+                (s) => s.subjectId === sub.id && s.finalized && s.personalStatus !== "frozen" && (s.personalStatus === "present" || s.personalStatus === "absent")
+              );
+              const present = subSessions.filter((s) => s.personalStatus === "present").length;
+              const total = subSessions.length;
+              const pct = total === 0 ? null : Math.round((present / total) * 1000) / 10;
+              
+              const subErp = subSessions.filter((s) => s.erpStatus === "Present" || s.erpStatus === "Absent");
+              const erpPresent = subErp.filter((s) => s.erpStatus === "Present").length;
+              const erpPct = total === 0 ? null : Math.round((erpPresent / total) * 1000) / 10;
+              const erpNotEntered = subSessions.filter((s) => s.erpStatus === null).length;
+              const frozenCount = sessions.filter((s) => s.subjectId === sub.id && s.personalStatus === "frozen").length;
+
+              return (
+                <Card key={sub.id} className="border bg-card">
+                  <CardContent className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h4 className="font-semibold text-sm">{sub.name}</h4>
+                          <Badge variant="outline" className="font-mono text-[10px]">
+                            {sub.code}
+                          </Badge>
+                          {frozenCount > 0 ? (
+                            <span className="text-[10px] text-sky-700 bg-sky-50 dark:bg-sky-950/40 dark:text-sky-300 px-1.5 py-0.5 rounded border border-sky-200 flex items-center gap-1">
+                              <Snowflake className="h-2.5 w-2.5" /> {frozenCount} Frozen
+                            </span>
+                          ) : null}
+                        </div>
+                        <Badge variant="outline" className="mt-1 text-[10px]">
+                          {sub.category}
+                        </Badge>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-lg font-bold">{pct !== null ? `${pct}%` : "N/A"}</span>
+                        <p className="text-[10px] text-muted-foreground">AttendWise</p>
+                      </div>
+                    </div>
+
+                    {pct !== null ? (
+                      <Progress value={pct} className="h-2" aria-label={`${sub.name} attendance`} />
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No finalized sessions yet</p>
+                    )}
+
+                    <div className="grid grid-cols-4 gap-2 pt-1 text-center text-xs">
+                      <div className="rounded bg-muted/40 p-1.5">
+                        <p className="font-semibold text-emerald-700 dark:text-emerald-400">{present}</p>
+                        <p className="text-[10px] text-muted-foreground">Present</p>
+                      </div>
+                      <div className="rounded bg-muted/40 p-1.5">
+                        <p className="font-semibold">{total}</p>
+                        <p className="text-[10px] text-muted-foreground">Eligible</p>
+                      </div>
+                      <div className="rounded bg-muted/40 p-1.5">
+                        <p className="font-semibold text-secondary-foreground">{erpPct !== null ? `${erpPct}%` : "N/A"}</p>
+                        <p className="text-[10px] text-muted-foreground">ERP %</p>
+                      </div>
+                      <div className="rounded bg-muted/40 p-1.5">
+                        <p className="font-semibold text-amber-700 dark:text-amber-400">{erpNotEntered}</p>
+                        <p className="text-[10px] text-muted-foreground">No ERP</p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ERP Comparison Breakdown Summary */}
+      <Card className="shadow-xs">
+        <CardHeader>
+          <CardTitle className="text-base font-bold">ERP & Record Comparison Summary</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Breakdown of matching records, potential discrepancies, and unentered ERP states.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+            <div className="rounded-xl border p-4 bg-muted/30">
+              <p className="text-muted-foreground text-xs font-medium">Matching Records</p>
+              <p className="mt-1 text-2xl font-bold text-emerald-700 dark:text-emerald-400">{stats.matchCount}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">AttendWise matches ERP observation</p>
+            </div>
+            <div className="rounded-xl border p-4 bg-muted/30">
+              <p className="text-muted-foreground text-xs font-medium">Potential Discrepancies</p>
+              <p className="mt-1 text-2xl font-bold text-chart-4">{stats.discrepancyCount}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">AttendWise and ERP differ</p>
+            </div>
+            <div className="rounded-xl border p-4 bg-muted/30">
+              <p className="text-muted-foreground text-xs font-medium">ERP Not Entered</p>
+              <p className="mt-1 text-2xl font-bold text-muted-foreground">{stats.erpNotEnteredCount}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">Included in shared denominator</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <AttendanceCardDialog
         open={dialogOpen}
