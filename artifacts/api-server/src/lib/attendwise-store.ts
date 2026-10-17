@@ -894,20 +894,30 @@ function metricFor(list: ClassSession[]): AttendanceMetric {
   };
 }
 
+function erpMetricFor(list: ClassSession[]): AttendanceMetric {
+  const eligible = list.filter(isAttendanceEligible);
+  const totalEligible = eligible.length;
+  const presentCount = eligible.filter((session) => session.erpStatus === "Present").length;
+  const absentCount = eligible.filter((session) => session.erpStatus === "Absent").length;
+  return {
+    percentage:
+      totalEligible === 0
+        ? null
+        : Math.round((presentCount / totalEligible) * 1000) / 10,
+    presentCount,
+    absentCount,
+    totalEligible,
+  };
+}
+
 export function getDashboardSummary(now = new Date()): DashboardSummary {
   finalizeExpiredSessions(now);
   const eligible = sessions.filter(isAttendanceEligible);
-  const erpEntered = eligible.filter((session) => session.erpStatus !== null);
   return {
     overall: metricFor(sessions),
     theory: metricFor(sessions.filter((session) => session.category === "Theory")),
     practical: metricFor(sessions.filter((session) => session.category === "Practical")),
-    erp: metricFor(
-      erpEntered.map((session) => ({
-        ...session,
-        personalStatus: session.erpStatus === "Present" ? "present" : "absent",
-      })),
-    ),
+    erp: erpMetricFor(sessions),
     targetPercent: profile.attendanceTarget,
     erpNotEnteredCount: eligible.filter((session) => session.erpStatus === null).length,
     upcomingCount: sessions.filter(

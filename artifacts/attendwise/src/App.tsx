@@ -11,6 +11,7 @@ import { Link, Route, Switch, useLocation, Router as WouterRouter } from "wouter
 import {
   Activity,
   ArrowRight,
+  BarChart3,
   BookOpen,
   CalendarDays,
   CalendarRange,
@@ -41,6 +42,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import AcademicCalendarView from "./pages/academic-calendar";
+import AnalyticsPage from "./pages/analytics";
 import {
   getCalendarDayInfo,
   SISTEC_OFFICIAL_HOLIDAYS,
@@ -62,6 +64,7 @@ import {
   recordSessionErpStatus,
   updateSessionNote,
   freezeClassSession,
+  unfreezeClassSession,
   cancelClassSession,
   finalizeExpiredSessionsForStudent,
   computeAttendanceStats,
@@ -413,7 +416,7 @@ function Shell({
   const [mobileNav, setMobileNav] = useState(false);
   const navItems = [
     { href: "/dashboard", title: "Dashboard", icon: LayoutDashboard },
-    { href: "/analytics", title: "Analytics", icon: Activity },
+    { href: "/analytics", title: "Analytics", icon: BarChart3 },
     { href: "/timetable", title: "My Timetable", icon: CalendarDays },
     { href: "/calendar", title: "Academic Calendar", icon: CalendarRange },
     { href: "/history", title: "Attendance History", icon: Activity },
@@ -3365,7 +3368,7 @@ function Comparison({
 }
 
 // Dedicated Analytics Page View
-function AnalyticsPage({
+function _LegacyInlineAnalyticsPage({
   user,
   sessions,
   subjects,
@@ -4498,6 +4501,8 @@ export default function App() {
               finalized: true,
               frozenAt: nowIso,
               finalizedAt: nowIso,
+              previousPersonalStatus: s.personalStatus !== "frozen" ? s.personalStatus : "absent",
+              previousErpStatus: s.erpStatus ?? null,
             }
           : s
       )
@@ -4505,6 +4510,25 @@ export default function App() {
     // 2. Persist to Firestore / IndexedDB cache
     if (user) {
       await freezeClassSession(user.uid, sessionId);
+    }
+  };
+
+  const handleUnfreezeClassQuick = async (sessionId: string) => {
+    setSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== sessionId) return s;
+        const restoredStatus =
+          (s as any).previousPersonalStatus === "present" ? "present" : "absent";
+        return {
+          ...s,
+          personalStatus: restoredStatus,
+          frozenAt: null,
+          finalized: true,
+        };
+      })
+    );
+    if (user) {
+      await unfreezeClassSession(user.uid, sessionId);
     }
   };
 
@@ -4553,6 +4577,20 @@ export default function App() {
                     onMarkPresent={handleMarkPresentQuick}
                     onMarkAbsent={handleMarkAbsentQuick}
                     onFreezeClass={handleFreezeClassQuick}
+                  />
+                )}
+              />
+              <Route
+                path="/analytics"
+                component={() => (
+                  <AnalyticsPage
+                    user={user}
+                    profile={profile}
+                    sessions={sessions}
+                    subjects={subjects}
+                    onRecordErp={handleRecordErp}
+                    onFreezeClass={handleFreezeClassQuick}
+                    onUnfreezeClass={handleUnfreezeClassQuick}
                   />
                 )}
               />

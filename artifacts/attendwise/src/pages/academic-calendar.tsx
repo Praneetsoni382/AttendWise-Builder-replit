@@ -26,9 +26,10 @@ import {
   getHolidayInfo,
   getTeachingDayNumber,
   isTeachingDay,
+  setCalendarOverride,
   type CalendarDayInfo,
 } from "../data/sistec-calendar";
-import { formatDateKey, TIMEZONE } from "../lib/firebase";
+import { formatDateKey, TIMEZONE, syncSessionsForDate } from "../lib/firebase";
 
 const MONTH_DATA = [
   { monthIndex: 7, name: "August 2026", year: 2026, monthNum: "08", days: 31 },
@@ -40,6 +41,15 @@ const MONTH_DATA = [
 
 export default function AcademicCalendarView() {
   const [selectedMonthIdx, setSelectedMonthIdx] = useState(2); // Default to October 2026 (index 2)
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [selectedDayForEdit, setSelectedDayForEdit] = useState<CalendarDayInfo | null>(null);
+
+  React.useEffect(() => {
+    const handleUpdate = () => setRefreshKey((k) => k + 1);
+    window.addEventListener("sistec-calendar-updated", handleUpdate);
+    return () => window.removeEventListener("sistec-calendar-updated", handleUpdate);
+  }, []);
+
   const currentMonth = MONTH_DATA[selectedMonthIdx]!;
 
   const todayDateKey = formatDateKey(new Date());
@@ -264,7 +274,9 @@ export default function AcademicCalendarView() {
               return (
                 <div
                   key={dayInfo.date}
-                  className={`min-h-20 sm:min-h-24 p-1.5 sm:p-2 rounded-lg flex flex-col justify-between transition-all ${bgClasses}`}
+                  onClick={() => setSelectedDayForEdit(dayInfo)}
+                  className={`min-h-20 sm:min-h-24 p-1.5 sm:p-2 rounded-lg flex flex-col justify-between transition-all cursor-pointer hover:ring-2 hover:ring-primary/50 ${bgClasses}`}
+                  title="Click to edit date status (Working / Off / Holiday)"
                 >
                   <div className="flex items-center justify-between">
                     <span
@@ -426,6 +438,102 @@ export default function AcademicCalendarView() {
           </Card>
         </div>
       </div>
+
+      {/* Date Edit Modal Dialog */}
+      {selectedDayForEdit && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-md shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <CardHeader className="border-b pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <CalendarDays className="h-5 w-5 text-primary" /> Edit Calendar Date
+                </CardTitle>
+                <Badge variant="outline" className="font-mono text-xs">
+                  {selectedDayForEdit.date}
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Customize working status or holidays. Automatic synchronization will update all classes and attendance records instantly.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-4 pt-4">
+              <div className="rounded-lg bg-muted/50 p-3 text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Current Title:</span>
+                  <span className="font-semibold text-foreground">{selectedDayForEdit.title}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Status:</span>
+                  <span className={`font-semibold ${selectedDayForEdit.isWorkingDay ? "text-primary" : "text-destructive"}`}>
+                    {selectedDayForEdit.isWorkingDay ? "Working Day" : "Off / Non-Working"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2">
+                <Button
+                  className="w-full justify-start gap-2 bg-primary text-primary-foreground hover:bg-primary/90"
+                  onClick={() => {
+                    setCalendarOverride(selectedDayForEdit.date, {
+                      date: selectedDayForEdit.date,
+                      isWorking: true,
+                      type: "teaching",
+                      title: "Custom Working Day",
+                      description: "Manually set as working day by student",
+                    });
+                    syncSessionsForDate(selectedDayForEdit.date, true);
+                    setSelectedDayForEdit(null);
+                  }}
+                >
+                  <GraduationCap className="h-4 w-4" />
+                  Set as Working Day (Show Classes)
+                </Button>
+
+                <Button
+                  variant="destructive"
+                  className="w-full justify-start gap-2"
+                  onClick={() => {
+                    setCalendarOverride(selectedDayForEdit.date, {
+                      date: selectedDayForEdit.date,
+                      isWorking: false,
+                      type: "off",
+                      title: "Custom Off Day",
+                      description: "Manually set as off day by student",
+                    });
+                    syncSessionsForDate(selectedDayForEdit.date, false);
+                    setSelectedDayForEdit(null);
+                  }}
+                >
+                  <PartyPopper className="h-4 w-4" />
+                  Set as Off / Holiday (Exclude Classes)
+                </Button>
+
+                <Button
+                  variant="outline"
+                  className="w-full justify-start gap-2 text-muted-foreground"
+                  onClick={() => {
+                    setCalendarOverride(selectedDayForEdit.date, null);
+                    syncSessionsForDate(selectedDayForEdit.date, true);
+                    setSelectedDayForEdit(null);
+                  }}
+                >
+                  Reset to Default Academic Calendar
+                </Button>
+              </div>
+
+              <div className="pt-2 flex justify-end">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedDayForEdit(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }

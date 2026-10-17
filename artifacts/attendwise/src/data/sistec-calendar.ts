@@ -142,7 +142,7 @@ export const BTECH_3RD_TEACHING_DAYS: Record<string, number> = {
   "2026-09-29": 8,
   "2026-09-30": 9,
 
-  // October 2026 (Days 10 - 31)
+  // October 2026 (Days 10 - 31, excluding Oct 17 which is off per calendar image)
   "2026-10-01": 10,
   "2026-10-05": 11,
   "2026-10-06": 12,
@@ -153,8 +153,9 @@ export const BTECH_3RD_TEACHING_DAYS: Record<string, number> = {
   "2026-10-12": 17,
   "2026-10-13": 18,
   "2026-10-14": 19,
-  "2026-10-15": 20, // Today!
+  "2026-10-15": 20,
   "2026-10-16": 21,
+  // 2026-10-17 is off (*) per official calendar image
   "2026-10-21": 22,
   "2026-10-22": 23,
   "2026-10-23": 24,
@@ -166,7 +167,7 @@ export const BTECH_3RD_TEACHING_DAYS: Record<string, number> = {
   "2026-10-30": 30,
   "2026-10-31": 31, // Working Saturday
 
-  // November 2026 (Days 32 - 45)
+  // November 2026 (Days 32 - 49, including MST-I green exam working days)
   "2026-11-02": 32,
   "2026-11-03": 33,
   "2026-11-04": 34,
@@ -181,27 +182,70 @@ export const BTECH_3RD_TEACHING_DAYS: Record<string, number> = {
   "2026-11-18": 42,
   "2026-11-19": 43,
   "2026-11-20": 44,
-  // 2026-11-23 to 2026-11-27: MST-I
-  "2026-11-30": 45,
+  // MST-I (Green working/exam days for B.Tech 3rd)
+  "2026-11-23": 45,
+  "2026-11-24": 46,
+  "2026-11-25": 47,
+  "2026-11-26": 48,
+  "2026-11-27": 49,
+  "2026-11-30": 50,
 
-  // December 2026 (Days 46 - 57)
-  "2026-12-01": 46,
-  "2026-12-02": 47,
+  // December 2026 (Days 51 - 71, including MST-II and RGPV Exam working/exam days)
+  "2026-12-01": 51,
+  "2026-12-02": 52,
   // 2026-12-03: Gas Tragedy Memorial Holiday
-  "2026-12-04": 48,
-  "2026-12-07": 49,
-  "2026-12-08": 50,
-  "2026-12-09": 51,
-  "2026-12-10": 52,
-  "2026-12-11": 53,
-  "2026-12-12": 54, // Working Saturday
-  "2026-12-14": 55,
-  "2026-12-15": 56,
-  "2026-12-16": 57, // Final instructional day!
-  // 2026-12-17 to 2026-12-23: MST-II
+  "2026-12-04": 53,
+  "2026-12-07": 54,
+  "2026-12-08": 55,
+  "2026-12-09": 56,
+  "2026-12-10": 57,
+  "2026-12-11": 58,
+  "2026-12-12": 59, // Working Saturday
+  "2026-12-14": 60,
+  "2026-12-15": 61,
+  "2026-12-16": 62, // Final instructional day!
+  // MST-II (Green working/exam days for B.Tech 3rd)
+  "2026-12-17": 63,
+  "2026-12-18": 64,
+  "2026-12-21": 65,
+  "2026-12-22": 66,
+  "2026-12-23": 67,
   // 2026-12-25: Christmas Holiday
-  // 2026-12-28 to 2026-12-31: RGPV Exam
+  // RGPV Exam working/exam days for B.Tech 3rd
+  "2026-12-28": 68,
+  "2026-12-29": 69,
+  "2026-12-30": 70,
+  "2026-12-31": 71,
 };
+
+// Calendar Overrides Storage & Management
+export interface CalendarOverride {
+  date: string;
+  isWorking: boolean;
+  type: CalendarDayType;
+  title: string;
+  description?: string;
+}
+
+export function getCalendarOverrides(): Record<string, CalendarOverride> {
+  try {
+    const raw = localStorage.getItem("sistec_calendar_overrides");
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function setCalendarOverride(dateKey: string, override: CalendarOverride | null) {
+  const overrides = getCalendarOverrides();
+  if (!override) {
+    delete overrides[dateKey];
+  } else {
+    overrides[dateKey] = override;
+  }
+  localStorage.setItem("sistec_calendar_overrides", JSON.stringify(overrides));
+  window.dispatchEvent(new Event("sistec-calendar-updated"));
+}
 
 // Quick helper to check if a specific date (YYYY-MM-DD) is an official holiday
 export function getHolidayInfo(dateKey: string): AcademicHoliday | undefined {
@@ -210,11 +254,19 @@ export function getHolidayInfo(dateKey: string): AcademicHoliday | undefined {
 
 // Quick helper to check if a specific date is a teaching day
 export function isTeachingDay(dateKey: string): boolean {
+  const overrides = getCalendarOverrides();
+  if (overrides[dateKey]) {
+    return overrides[dateKey]!.isWorking;
+  }
   return dateKey in BTECH_3RD_TEACHING_DAYS;
 }
 
 // Get the teaching day number (1 - 57) if applicable
 export function getTeachingDayNumber(dateKey: string): number | null {
+  const overrides = getCalendarOverrides();
+  if (overrides[dateKey]) {
+    return overrides[dateKey]!.isWorking ? (BTECH_3RD_TEACHING_DAYS[dateKey] ?? 99) : null;
+  }
   return BTECH_3RD_TEACHING_DAYS[dateKey] ?? null;
 }
 
@@ -223,6 +275,21 @@ export function getCalendarDayInfo(dateKey: string): CalendarDayInfo {
   const [y, m, d] = dateKey.split("-").map(Number);
   const dateObj = new Date(Date.UTC(y!, m! - 1, d!));
   const dayOfWeek = (dateObj.getUTCDay() === 0 ? 7 : dateObj.getUTCDay()); // 1 (Mon) - 7 (Sun)
+
+  // 0. Check custom user override
+  const overrides = getCalendarOverrides();
+  if (overrides[dateKey]) {
+    const ov = overrides[dateKey]!;
+    return {
+      date: dateKey,
+      dayOfWeek,
+      type: ov.type,
+      title: ov.title,
+      description: ov.description ?? (ov.isWorking ? "Custom Working Day Override" : "Custom Off / Holiday Override"),
+      isWorkingDay: ov.isWorking,
+      dayNumber: ov.isWorking ? (BTECH_3RD_TEACHING_DAYS[dateKey] ?? 99) : undefined,
+    };
+  }
 
   // 1. Check for official holiday
   const holiday = getHolidayInfo(dateKey);

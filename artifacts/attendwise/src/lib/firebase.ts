@@ -478,16 +478,13 @@ export function buildDefaultSistecData(uid: string): {
 
   const now = new Date();
   const sessions: ClassSessionItem[] = [];
+  const teachingDateKeys = Object.keys(BTECH_3RD_TEACHING_DAYS);
 
-  for (let dayOffset = -7; dayOffset <= 14; dayOffset++) {
-    const d = new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000);
-    const weekday = getWeekdayIST(d);
-    if (weekday === 7) continue;
-
-    const dateKey = formatDateKey(d);
-    if (!isTeachingDay(dateKey)) continue;
-
-    const academicDay = getTeachingDayNumber(dateKey);
+  for (const dateKey of teachingDateKeys) {
+    const [y, m, d] = dateKey.split("-").map(Number);
+    const dateObj = new Date(Date.UTC(y!, m! - 1, d!));
+    const weekday = (dateObj.getUTCDay() === 0 ? 7 : dateObj.getUTCDay());
+    const academicDay = BTECH_3RD_TEACHING_DAYS[dateKey];
     const matchingEntries = timetable.filter((e) => e.active && e.dayOfWeek === weekday);
 
     for (const entry of matchingEntries) {
@@ -529,7 +526,7 @@ export function buildDefaultSistecData(uid: string): {
   return { subjects, timetable, sessions };
 }
 
-// Generate active upcoming class sessions strictly according to SISTec Academic Calendar
+// Generate active upcoming class sessions strictly according to SISTec Academic Calendar starting from Sept 21, 2026
 export async function generateWeeklySessions(uid: string): Promise<void> {
   const timetableRef = collection(db, "users", uid, "timetableEntries");
   const sessionsRef = collection(db, "users", uid, "classSessions");
@@ -542,7 +539,6 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
     timetableSnap.forEach((d) => entries.push(d.data() as TimetableItem));
 
     // 1. Purge any accidental sessions that fall on official holidays or non-teaching days
-    // to strictly enforce the Academic Calendar rule: "if holiday is there then it must not be counted"
     const existingSessionsSnap = await getDocs(sessionsRef);
     const existingDateIds = new Set<string>();
 
@@ -550,7 +546,6 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
       const sData = sDoc.data() as ClassSessionItem;
       existingDateIds.add(sDoc.id);
 
-      // If a session exists on a non-teaching date (Holiday, Sunday, etc.) and is not marked present:
       if (!isTeachingDay(sData.scheduledDate)) {
         try {
           await deleteDoc(sDoc.ref);
@@ -565,22 +560,13 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
     const batch = writeBatch(db);
     let sessionCount = 0;
 
-    // Check window from 7 days ago to 14 days ahead in IST
-    for (let dayOffset = -7; dayOffset <= 14; dayOffset++) {
-      const d = new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000);
-      const weekday = getWeekdayIST(d);
-      if (weekday === 7) continue; // Sunday has no classes
+    const teachingDateKeys = Object.keys(BTECH_3RD_TEACHING_DAYS);
 
-      const dateKey = formatDateKey(d);
-
-      // CRITICAL ACADEMIC CALENDAR GATE:
-      // Only schedule classes on approved B.Tech 3rd teaching days (Days 1 to 57)!
-      // Official holidays (e.g. Gandhi Jayanti, Durga Navmi, Vijay Dashmi, Diwali, Gas Tragedy)
-      // and non-instructional days are completely skipped.
-      if (!isTeachingDay(dateKey)) {
-        continue;
-      }
-
+    for (const dateKey of teachingDateKeys) {
+      if (!isTeachingDay(dateKey)) continue;
+      const [y, m, d] = dateKey.split("-").map(Number);
+      const dateObj = new Date(Date.UTC(y!, m! - 1, d!));
+      const weekday = (dateObj.getUTCDay() === 0 ? 7 : dateObj.getUTCDay());
       const academicDay = getTeachingDayNumber(dateKey);
       const matchingEntries = entries.filter((e) => e.active && e.dayOfWeek === weekday);
 
@@ -592,7 +578,6 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
         const startAt = makeIstDateTime(dateKey, entry.startTime);
         const endAt = makeIstDateTime(dateKey, entry.endTime);
 
-        // Academic integrity: if session already ended in past, mark absent; if today or future, upcoming
         const isOverdue = now.getTime() >= endAt.getTime();
         const initialStatus = isOverdue ? "absent" : "upcoming";
         const isFinalized = isOverdue;
@@ -920,9 +905,9 @@ export async function finalizeExpiredSessionsForStudent(
 }
 
 import { getCachedStore, setCachedStore } from "./idb-cache";
-import { collection, getDocs, query, orderBy } from "firebase/firestore";
+import { computeFullAnalytics, isSessionEligible } from "./analytics-calculator";
 
-// Freeze class session (permanently removed from all calculations)
+// Freeze class session (excluded from all attendance calculations and denominators)
 export async function freezeClassSession(uid: string, sessionId: string): Promise<void> {
   const now = new Date().toISOString();
 
@@ -930,11 +915,18 @@ export async function freezeClassSession(uid: string, sessionId: string): Promis
   if (auth.currentUser && !uid.startsWith("local-")) {
     try {
       const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
+      const sessionSnap = await getDoc(sessionRef);
+      const prevData = sessionSnap.exists() ? (sessionSnap.data() as ClassSessionItem) : null;
+      const prevStatus = prevData?.personalStatus !== "frozen" ? prevData?.personalStatus : "absent";
+      const prevErp = prevData?.erpStatus ?? null;
+
       await updateDoc(sessionRef, {
         personalStatus: "frozen",
         finalized: true,
         frozenAt: now,
         finalizedAt: now,
+        previousPersonalStatus: prevStatus,
+        previousErpStatus: prevErp,
       });
 
       const eventRef = doc(db, "users", uid, "attendanceEvents", `event-freeze-${sessionId}-${Date.now()}`);
@@ -943,7 +935,7 @@ export async function freezeClassSession(uid: string, sessionId: string): Promis
         sessionId,
         eventType: "session_frozen",
         serverTimestamp: now,
-        message: "Class session permanently frozen and excluded from all calculations.",
+        message: "Class session frozen and excluded from all attendance calculations.",
       });
     } catch (e) {
       console.warn("Firestore update error in freezeClassSession:", e);
@@ -962,6 +954,8 @@ export async function freezeClassSession(uid: string, sessionId: string): Promis
               finalized: true,
               frozenAt: now,
               finalizedAt: now,
+              previousPersonalStatus: s.personalStatus !== "frozen" ? s.personalStatus : "absent",
+              previousErpStatus: s.erpStatus ?? null,
             }
           : s
       );
@@ -972,69 +966,82 @@ export async function freezeClassSession(uid: string, sessionId: string): Promis
   }
 }
 
-// Attendance calculations adhering strictly to Part 7:
-// Zero denominator returns null (displays N/A)
-export function computeAttendanceStats(sessions: ClassSessionItem[]) {
-  // Only valid sessions on teaching days count
-  const validSessions = sessions.filter((s) => isTeachingDay(s.scheduledDate));
+// Unfreeze class session (restores class to eligible calculations with original state preserved)
+export async function unfreezeClassSession(uid: string, sessionId: string): Promise<void> {
+  const now = new Date().toISOString();
 
-  // Only finalized, non-cancelled/frozen sessions count toward attendance
-  const eligible = validSessions.filter(
-    (s) => s.finalized && (s.personalStatus === "present" || s.personalStatus === "absent")
-  );
+  if (auth.currentUser && !uid.startsWith("local-")) {
+    try {
+      const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
+      const sessionSnap = await getDoc(sessionRef);
+      const sessionData = sessionSnap.exists() ? (sessionSnap.data() as ClassSessionItem) : null;
 
-  const theoryEligible = eligible.filter((s) => s.category === "Theory");
-  const practicalEligible = eligible.filter((s) => s.category === "Practical");
+      // Restore to previous personal status, default to absent if class has already passed
+      const restoredStatus =
+        sessionData?.previousPersonalStatus === "present"
+          ? "present"
+          : "absent";
 
-  const calcMetric = (list: ClassSessionItem[]) => {
-    const presentCount = list.filter((s) => s.personalStatus === "present").length;
-    const absentCount = list.filter((s) => s.personalStatus === "absent").length;
-    const total = presentCount + absentCount;
-    const percentage = total === 0 ? null : Math.round((presentCount / total) * 1000) / 10;
-    return {
-      percentage,
-      presentCount,
-      absentCount,
-      totalEligible: total,
-    };
-  };
+      await updateDoc(sessionRef, {
+        personalStatus: restoredStatus,
+        frozenAt: null,
+        finalized: true,
+        finalizedAt: sessionData?.finalizedAt || now,
+      });
 
-  // ERP calculation: only sessions with ERP status Present or Absent
-  const erpEligible = eligible.filter((s) => s.erpStatus === "Present" || s.erpStatus === "Absent");
-  const erpPresentCount = erpEligible.filter((s) => s.erpStatus === "Present").length;
-  const erpAbsentCount = erpEligible.filter((s) => s.erpStatus === "Absent").length;
-  const erpTotal = erpPresentCount + erpAbsentCount;
-  const erpPercentage = erpTotal === 0 ? null : Math.round((erpPresentCount / erpTotal) * 1000) / 10;
-
-  // ERP comparison breakdown
-  const erpNotEnteredCount = eligible.filter((s) => s.erpStatus === null).length;
-  let matchCount = 0;
-  let discrepancyCount = 0;
-
-  for (const s of erpEligible) {
-    const personalErp = s.personalStatus === "present" ? "Present" : "Absent";
-    if (s.erpStatus === personalErp) {
-      matchCount++;
-    } else {
-      discrepancyCount++;
+      const eventRef = doc(db, "users", uid, "attendanceEvents", `event-unfreeze-${sessionId}-${Date.now()}`);
+      await setDoc(eventRef, {
+        id: `event-unfreeze-${sessionId}-${Date.now()}`,
+        sessionId,
+        eventType: "session_unfrozen",
+        serverTimestamp: now,
+        message: `Class session unfrozen and restored to calculations as ${restoredStatus}.`,
+      });
+    } catch (e) {
+      console.warn("Firestore update error in unfreezeClassSession:", e);
     }
   }
 
+  try {
+    const cachedSessions = await getCachedStore<ClassSessionItem>("sessions");
+    if (cachedSessions && cachedSessions.length > 0) {
+      const updated = cachedSessions.map((s) => {
+        if (s.id !== sessionId) return s;
+        const restoredStatus =
+          (s as any).previousPersonalStatus === "present" ? "present" : "absent";
+        return {
+          ...s,
+          personalStatus: restoredStatus as any,
+          frozenAt: null,
+          finalized: true,
+        };
+      });
+      await setCachedStore("sessions", updated);
+    }
+  } catch (err) {
+    console.warn("IDB cache update error in unfreezeClassSession:", err);
+  }
+}
+
+// Attendance calculations adhering strictly to Part 4, 5, 6, 7 & 10:
+// Both AttendWise and ERP percentage use the IDENTICAL shared denominator (total eligible completed unfrozen classes).
+// Zero denominator returns null (displays N/A).
+export function computeAttendanceStats(sessions: ClassSessionItem[]) {
+  const full = computeFullAnalytics(sessions);
+
   return {
-    overall: calcMetric(eligible),
-    theory: calcMetric(theoryEligible),
-    practical: calcMetric(practicalEligible),
-    erp: {
-      percentage: erpPercentage,
-      presentCount: erpPresentCount,
-      absentCount: erpAbsentCount,
-      totalEligible: erpTotal,
-    },
-    erpNotEnteredCount,
-    matchCount,
-    discrepancyCount,
-    totalFinalized: eligible.length,
-    upcomingCount: sessions.filter((s) => !s.finalized && s.personalStatus === "upcoming").length,
+    overall: full.overall,
+    theory: full.theory.attendwise,
+    practical: full.practical.attendwise,
+    erp: full.erp,
+    erpNotEnteredCount: full.erp.notEnteredCount,
+    matchCount: full.comparison.matchingCount,
+    discrepancyCount: full.comparison.discrepancyCount,
+    frozenCount: full.overview.frozenCount,
+    cancelledCount: full.overview.cancelledCount,
+    totalFinalized: full.overview.totalEligibleCompleted,
+    upcomingCount: full.overview.upcomingCount,
+    full,
   };
 }
 export async function uploadSessionPhoto(
@@ -1046,3 +1053,62 @@ export async function uploadSessionPhoto(
   await uploadString(storageRef, photoDataUrl, "data_url");
   return await getDownloadURL(storageRef);
 }
+
+// Synchronize class sessions when a calendar date override is updated
+export function syncSessionsForDate(dateKey: string, isWorking: boolean) {
+  try {
+    const rawSessions = localStorage.getItem("sistec_class_sessions");
+    let sessions: ClassSessionItem[] = rawSessions ? JSON.parse(rawSessions) : [];
+
+    if (!isWorking) {
+      sessions = sessions.filter((s) => s.scheduledDate !== dateKey);
+    } else {
+      const existing = sessions.filter((s) => s.scheduledDate === dateKey);
+      if (existing.length === 0) {
+        const rawTimetable = localStorage.getItem("sistec_timetable");
+        const timetable: TimetableItem[] = rawTimetable ? JSON.parse(rawTimetable) : [];
+        const [y, m, d] = dateKey.split("-").map(Number);
+        const dateObj = new Date(Date.UTC(y!, m! - 1, d!));
+        const weekday = (dateObj.getUTCDay() === 0 ? 7 : dateObj.getUTCDay());
+        const matchingEntries = timetable.filter((e) => e.active && e.dayOfWeek === weekday);
+        const now = new Date();
+
+        for (const entry of matchingEntries) {
+          const sessionId = `session-${entry.id}-${dateKey}`;
+          const startAt = makeIstDateTime(dateKey, entry.startTime);
+          const endAt = makeIstDateTime(dateKey, entry.endTime);
+          const isOverdue = now.getTime() >= endAt.getTime();
+          sessions.push({
+            id: sessionId,
+            studentId: entry.studentId,
+            subjectId: entry.subjectId,
+            subjectName: entry.subjectName,
+            subjectCode: entry.subjectCode,
+            timetableEntryId: entry.id,
+            slot: entry.slot,
+            scheduledDate: dateKey,
+            scheduledStartAt: startAt.toISOString(),
+            scheduledEndAt: endAt.toISOString(),
+            category: entry.category,
+            room: entry.room ?? null,
+            personalStatus: isOverdue ? "absent" : "upcoming",
+            erpStatus: null,
+            note: null,
+            finalized: isOverdue,
+            finalizedAt: isOverdue ? endAt.toISOString() : null,
+            serverReceiptAt: null,
+            clientCaptureAt: null,
+            cancelledAt: null,
+            evidenceAvailable: false,
+            academicDayNumber: 99,
+          });
+        }
+      }
+    }
+    localStorage.setItem("sistec_class_sessions", JSON.stringify(sessions));
+    window.dispatchEvent(new Event("sistec-sessions-updated"));
+  } catch (err) {
+    console.error("Error syncing sessions for date:", err);
+  }
+}
+

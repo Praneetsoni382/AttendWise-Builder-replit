@@ -32,12 +32,13 @@ async function startServer() {
     const distPath = path.resolve(__dirname, "artifacts/attendwise/dist");
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath));
-      app.get("*", (_req: Request, res: Response) => {
+      app.use((_req: Request, res: Response) => {
         res.sendFile(path.resolve(distPath, "index.html"));
       });
     }
   } else {
     const vite = await createViteServer({
+      configFile: path.resolve(__dirname, "artifacts/attendwise/vite.config.ts"),
       root: path.resolve(__dirname, "artifacts/attendwise"),
       server: {
         middlewareMode: true,
@@ -48,6 +49,23 @@ async function startServer() {
       appType: "spa",
     });
     app.use(vite.middlewares);
+
+    // Fallback for SPA routing in development
+    app.use(async (req: Request, res: Response, next) => {
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        return next();
+      }
+      const url = req.originalUrl;
+      try {
+        const templatePath = path.resolve(__dirname, "artifacts/attendwise/index.html");
+        let template = fs.readFileSync(templatePath, "utf-8");
+        template = await vite.transformIndexHtml(url, template);
+        res.status(200).set({ "Content-Type": "text/html" }).end(template);
+      } catch (e) {
+        vite.ssrFixStacktrace(e as Error);
+        next(e);
+      }
+    });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
