@@ -36,6 +36,9 @@ import {
   Video,
   X,
   XCircle,
+  Snowflake,
+  Lock,
+  AlertTriangle,
 } from "lucide-react";
 import AcademicCalendarView from "./pages/academic-calendar";
 import {
@@ -49,11 +52,11 @@ import {
   db,
   signUpStudent,
   signInStudent,
-  signInWithGoogle,
   resetStudentPassword,
   logOutStudent,
   ensureSistecTimetableLoaded,
   syncTimetableSlotTimings,
+  buildDefaultSistecData,
   markSessionPresent,
   markSessionAbsent,
   recordSessionErpStatus,
@@ -73,6 +76,13 @@ import {
   type ClassSessionItem,
   type AttendanceEventItem,
 } from "./lib/firebase";
+import {
+  registerStudent,
+  loginStudent,
+  logoutStudentUser,
+  getStoredActiveSession,
+  type AppStudentUser,
+} from "./lib/auth-service";
 import { SISTEC_METADATA, SISTEC_TIME_SLOTS } from "./data/sistec-timetable";
 import { Button } from "@workspace/attendwise-design-system/components/ui/button";
 import { Badge } from "@workspace/attendwise-design-system/components/ui/badge";
@@ -308,15 +318,16 @@ const asPct = (value: number | null | undefined) =>
   value === null || value === undefined ? "N/A" : `${Math.round(value)}%`;
 
 const isSessionInWindow = (session: ClassSessionItem, nowMs: number = Date.now()) => {
-  if (session.finalized || session.personalStatus === "cancelled") return false;
+  if (session.finalized || session.personalStatus === "cancelled" || session.personalStatus === "frozen") return false;
   const startMs = new Date(session.scheduledStartAt).getTime();
   const endMs = new Date(session.scheduledEndAt).getTime();
   return !isNaN(startMs) && !isNaN(endMs) && nowMs >= startMs && nowMs < endMs;
 };
 
 const sessionStatusLabel = (session: ClassSessionItem, nowMs: number = Date.now()) => {
-  if (session.personalStatus === "present") return "Present";
+  if (session.personalStatus === "frozen") return "Class Frozen (Excluded)";
   if (session.personalStatus === "cancelled") return "Cancelled";
+  if (session.personalStatus === "present") return "Present";
   if (session.personalStatus === "absent") {
     return session.absentType === "manual_student" ? "Marked Absent by Student" : "Automatically Marked Absent";
   }
@@ -329,12 +340,18 @@ const sessionStatusLabel = (session: ClassSessionItem, nowMs: number = Date.now(
 };
 
 function StateBadge({ status, children }: { status: string; children: ReactNode }) {
+  const isFrozen = status === "frozen" || status === "Frozen" || status.includes("Frozen");
   const isPresent = status === "present" || status === "Present" || status === "match";
-  const isAbsent = status === "absent" || status === "Absent" || status === "Automatically marked Absent";
+  const isAbsent = status === "absent" || status === "Absent" || status === "Automatically marked Absent" || status === "Marked Absent by Student" || status === "Automatically Marked Absent";
   const isInRun = status === "in_run" || status === "In Run";
+  const isCancelled = status === "cancelled" || status === "Cancelled";
   const isDiscrepancy = status === "potential_discrepancy";
 
-  const color = isPresent
+  const color = isFrozen
+    ? "border-sky-500/40 bg-sky-500/15 text-sky-800 dark:text-sky-300 font-semibold"
+    : isCancelled
+    ? "border-slate-500/30 bg-slate-500/15 text-slate-700 dark:text-slate-300 font-medium"
+    : isPresent
     ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 font-medium"
     : isAbsent
     ? "border-rose-500/30 bg-rose-500/15 text-rose-700 dark:text-rose-400 font-medium"
@@ -542,35 +559,25 @@ function AuthWelcome({ onAuthSuccess }: { onAuthSuccess: () => void }) {
   const [resetEmail, setResetEmail] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [infoMsg, setInfoMsg] = useState("");
   const [resetMsg, setResetMsg] = useState("");
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
+    setInfoMsg("");
     setPending(true);
     try {
       if (mode === "signup") {
-        if (!name.trim()) throw new Error("Please enter your full name.");
-        await signUpStudent(email.trim(), password, name.trim());
+        const res = await registerStudent(email, password, name);
+        if (res.message) setInfoMsg(res.message);
       } else {
-        await signInStudent(email.trim(), password);
+        const res = await loginStudent(email, password);
+        if (res.message) setInfoMsg(res.message);
       }
       onAuthSuccess();
     } catch (err: any) {
-      setError(err?.message?.replace(/^Firebase:\s*/, "") || "Authentication failed. Check your credentials.");
-    } finally {
-      setPending(false);
-    }
-  };
-
-  const handleGoogle = async () => {
-    setError("");
-    setPending(true);
-    try {
-      await signInWithGoogle();
-      onAuthSuccess();
-    } catch (err: any) {
-      setError(err?.message?.replace(/^Firebase:\s*/, "") || "Google sign-in could not be completed.");
+      setError(err?.message || "Authentication failed. Check your credentials.");
     } finally {
       setPending(false);
     }
@@ -625,6 +632,7 @@ function AuthWelcome({ onAuthSuccess }: { onAuthSuccess: () => void }) {
                   onClick={() => {
                     setMode(mode === "signin" ? "signup" : "signin");
                     setError("");
+                    setInfoMsg("");
                   }}
                 >
                   {mode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}
@@ -633,9 +641,16 @@ function AuthWelcome({ onAuthSuccess }: { onAuthSuccess: () => void }) {
             </CardHeader>
             <CardContent>
               {error ? (
-                <Alert variant="destructive" className="mb-4 py-2 text-xs">
+                <Alert variant="destructive" className="mb-4 py-2.5 text-xs">
                   <CircleAlert className="h-4 w-4" />
-                  <AlertDescription>{error}</AlertDescription>
+                  <AlertDescription className="font-medium">{error}</AlertDescription>
+                </Alert>
+              ) : null}
+
+              {infoMsg ? (
+                <Alert className="mb-4 py-2.5 text-xs bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                  <AlertDescription>{infoMsg}</AlertDescription>
                 </Alert>
               ) : null}
 
@@ -693,26 +708,9 @@ function AuthWelcome({ onAuthSuccess }: { onAuthSuccess: () => void }) {
                   />
                 </div>
 
-                <Button type="submit" disabled={pending} className="w-full mt-2 font-medium">
-                  {pending ? "Authenticating…" : mode === "signin" ? "Sign In to AttendWise" : "Create Account & Load Timetable"}
+                <Button type="submit" disabled={pending} className="w-full mt-3 font-medium">
+                  {pending ? "Authenticating…" : mode === "signin" ? "Sign In with Email & Password" : "Sign Up with College Email"}
                   <ArrowRight className="h-4 w-4 ml-1.5" />
-                </Button>
-
-                <div className="relative my-3 text-center text-xs">
-                  <Separator />
-                  <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-card px-2 text-muted-foreground">
-                    or
-                  </span>
-                </div>
-
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleGoogle}
-                  disabled={pending}
-                  className="w-full text-xs font-normal"
-                >
-                  <span className="font-semibold text-primary mr-1.5">G</span> Continue with Google
                 </Button>
               </form>
             </CardContent>
@@ -907,14 +905,16 @@ function AttendanceCardDialog({
   onRecordErp,
   onMarkPresent,
   onMarkAbsent,
+  onFreezeClass,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   session: ClassSessionItem | null;
-  user: FirebaseUser;
+  user: { uid: string; email?: string | null; displayName?: string | null };
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
   onMarkPresent?: (sessionId: string, photoUrl?: string) => Promise<void>;
   onMarkAbsent?: (sessionId: string) => Promise<void>;
+  onFreezeClass?: (sessionId: string) => Promise<void>;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -925,9 +925,10 @@ function AttendanceCardDialog({
   const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null);
   const [noteInput, setNoteInput] = useState(session?.note || "");
   const [evidencePhotoUrl, setEvidencePhotoUrl] = useState<string | null>(null);
+  const [confirmFreeze, setConfirmFreeze] = useState(false);
 
   useEffect(() => {
-    if (!open || !session || !user || !session.evidenceAvailable) {
+    if (!open || !session || !user || !session.evidenceAvailable || !auth.currentUser) {
       setEvidencePhotoUrl(null);
       return;
     }
@@ -1010,7 +1011,7 @@ function AttendanceCardDialog({
 
   // Listen to authoritative attendance events in Firestore
   useEffect(() => {
-    if (!open || !session || !user) return;
+    if (!open || !session || !user || !auth.currentUser) return;
     const q = collection(db, "users", user.uid, "attendanceEvents");
     const unsub = onSnapshot(
       q,
@@ -1084,8 +1085,11 @@ function AttendanceCardDialog({
       setStagedPersonalStatus(session.personalStatus);
       setStagedErpStatus(session.erpStatus);
       setStagedNote(session.note || "");
+      setConfirmFreeze(false);
     }
   }, [session?.id, session?.personalStatus, session?.erpStatus, session?.note]);
+
+  const isFrozen = stagedPersonalStatus === "frozen" || session?.personalStatus === "frozen";
 
   const handleStagePresent = () => {
     setStagedPersonalStatus("present");
@@ -1162,7 +1166,7 @@ function AttendanceCardDialog({
       ? `${Math.floor(secondsRemaining / 60)}m ${secondsRemaining % 60}s`
       : null;
 
-  const currentStatusLabel = sessionStatusLabel(session);
+  const currentStatusLabel = isFrozen ? "Class Frozen (Excluded)" : sessionStatusLabel(session);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1209,7 +1213,7 @@ function AttendanceCardDialog({
           ) : null}
 
           {/* Live countdown or status alert */}
-          {inWindow ? (
+          {!isFrozen && inWindow ? (
             <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center">
               <div className="flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-300 font-semibold text-sm">
                 <span className="relative flex h-3 w-3">
@@ -1222,7 +1226,7 @@ function AttendanceCardDialog({
                 Live countdown until the window closes: <strong className="font-mono text-sm">{countdownText}</strong>
               </p>
             </div>
-          ) : isToday && !session.finalized && nowMs < startMs ? (
+          ) : !isFrozen && isToday && !session.finalized && nowMs < startMs ? (
             <div className="rounded-xl border bg-muted/40 p-3.5 text-center text-xs text-muted-foreground">
               <Clock3 className="h-4 w-4 mx-auto mb-1 text-muted-foreground" />
               Upcoming class · Attendance window opens at <strong>{formatClock(session.scheduledStartAt)} IST</strong>
@@ -1242,7 +1246,11 @@ function AttendanceCardDialog({
                 </div>
               </div>
               <div>
-                {stagedPersonalStatus === "present" ? (
+                {isFrozen ? (
+                  <Badge className="bg-sky-500/15 text-sky-800 dark:text-sky-300 border-sky-500/30 text-xs">
+                    <Snowflake className="h-3 w-3 mr-1" /> Class Frozen (Excluded)
+                  </Badge>
+                ) : stagedPersonalStatus === "present" ? (
                   <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs">
                     <Check className="h-3 w-3 mr-1" /> Present (Staged / Locked)
                   </Badge>
@@ -1270,8 +1278,22 @@ function AttendanceCardDialog({
               </div>
             </div>
 
-            {/* If in active window and not yet marked */}
-            {inWindow && session.personalStatus === "upcoming" ? (
+            {/* If class is frozen, show permanent cancellation notice */}
+            {isFrozen ? (
+              <div className="rounded-xl border p-4 bg-sky-50/80 dark:bg-sky-950/40 border-sky-200 dark:border-sky-800 text-sky-900 dark:text-sky-200 space-y-2">
+                <div className="flex items-center gap-2 font-semibold text-sm">
+                  <Snowflake className="h-5 w-5 text-sky-600 dark:text-sky-400" />
+                  <span>Class Is Freezed (Permanently Cancelled)</span>
+                </div>
+                <p className="text-xs text-sky-800/90 dark:text-sky-300/90 leading-relaxed">
+                  This class session is frozen and treated as cancelled. It has been completely abducted and excluded from all attendance calculations, percentages, subject totals, and college dashboards.
+                </p>
+                <div className="flex items-center gap-2 text-[11px] font-medium text-sky-700 dark:text-sky-400 pt-1 border-t border-sky-200/60 dark:border-sky-800/60">
+                  <Lock className="h-3.5 w-3.5" />
+                  <span>Permanent & Immutable · No further attendance or ERP changes allowed</span>
+                </div>
+              </div>
+            ) : inWindow && session.personalStatus === "upcoming" ? (
               <div className="space-y-3 pt-2">
                 {/* Optional live camera capture matching image */}
                 <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
@@ -1305,22 +1327,27 @@ function AttendanceCardDialog({
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setCapturedPhotoUrl(null)}
+                        onClick={() => { setCapturedPhotoUrl(null); startCamera(); }}
                         className="w-full text-xs"
                       >
                         Retake / Remove Photo
                       </Button>
                     </div>
                   ) : (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={startCamera}
-                      className="w-full text-xs"
-                    >
-                      <Camera className="h-3.5 w-3.5 mr-1.5" /> Enable Live Camera (Optional)
-                    </Button>
+                    <div className="space-y-2">
+                      {error && (
+                        <p className="text-xs text-rose-600 bg-rose-50 p-2 rounded">{error}</p>
+                      )}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={startCamera}
+                        className="w-full text-xs"
+                      >
+                        <Camera className="h-3.5 w-3.5 mr-1.5" /> {error ? "Retry Camera" : "Enable Live Camera (Optional)"}
+                      </Button>
+                    </div>
                   )}
                 </div>
 
@@ -1470,52 +1497,127 @@ function AttendanceCardDialog({
             )}
 
             {/* Freeze Class Option */}
-            {session.personalStatus === "frozen" ? (
-              <div className="rounded-xl border p-4 bg-rose-500/10 border-rose-500/20 text-rose-800 dark:text-rose-300 text-xs font-semibold text-center flex items-center justify-center gap-2">
-                <XCircle className="h-4 w-4" /> Class Frozen and Excluded from Attendance
+            {isFrozen ? (
+              <div className="rounded-xl border p-4 bg-sky-500/10 border-sky-500/20 text-sky-900 dark:text-sky-200 text-xs font-semibold text-center flex items-center justify-center gap-2">
+                <Snowflake className="h-4 w-4 text-sky-600 dark:text-sky-400" /> Class Is Freezed (Permanently Cancelled & Excluded)
               </div>
             ) : (
               <div className="rounded-xl border p-4 bg-rose-50/50 border-rose-100 dark:bg-rose-950/20 dark:border-rose-900/50 space-y-2">
-                <h4 className="text-xs font-semibold text-rose-800 dark:text-rose-300">
-                  ⚠️ Advanced Actions
-                </h4>
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-rose-800 dark:text-rose-300 flex items-center gap-1.5">
+                    <Snowflake className="h-4 w-4 text-rose-600" /> Freeze Class (Cancel & Exclude)
+                  </h4>
+                  <Badge variant="outline" className="text-[10px] text-rose-700 border-rose-200 dark:border-rose-800">
+                    1-Time Immutable
+                  </Badge>
+                </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Freezing this class will remove it entirely from all attendance calculations and percentages. This action is <strong>permanent and immutable</strong>.
+                  Freezing this class permanently treats it as cancelled and abducts it from all attendance calculations, percentages, and totals. Once frozen, it can <strong>never be altered or counted</strong>.
                 </p>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="w-full text-xs text-rose-700 border-rose-200 hover:bg-rose-100 dark:text-rose-400 dark:border-rose-800"
-                  onClick={async () => {
-                    if (window.confirm("Are you sure you want to PERMANENTLY FREEZE this class? This action cannot be undone.")) {
-                      setBusy(true);
-                      try {
-                        await freezeClassSession(user.uid, session.id);
-                        setNotice("Class successfully frozen and removed from calculations.");
-                        // Keep open briefly so user sees the change
-                        setTimeout(() => onOpenChange(false), 1500);
-                      } catch (err: any) {
-                        setError(err?.message || "Could not freeze class.");
-                      } finally {
-                        setBusy(false);
-                      }
-                    }
-                  }}
-                  disabled={busy}
-                >
-                  <XCircle className="h-3.5 w-3.5 mr-1.5" /> Permanently Freeze Class
-                </Button>
+
+                {confirmFreeze ? (
+                  <div className="rounded-lg border border-rose-300 bg-rose-100/70 dark:bg-rose-950/60 p-3 space-y-2.5">
+                    <p className="text-xs font-semibold text-rose-900 dark:text-rose-200 flex items-center gap-1.5">
+                      <AlertTriangle className="h-4 w-4 text-rose-600" /> Confirm Permanent Class Freeze?
+                    </p>
+                    <p className="text-[11px] text-rose-800 dark:text-rose-300">
+                      This class will be permanently removed from all calculations. This action is irreversible and one-time final.
+                    </p>
+                    <div className="flex gap-2 pt-1">
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        className="flex-1 text-xs h-8 bg-rose-600 hover:bg-rose-700 text-white"
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          setError(null);
+                          try {
+                            setStagedPersonalStatus("frozen");
+                            if (onFreezeClass) {
+                              await onFreezeClass(session.id);
+                            } else {
+                              await freezeClassSession(user.uid, session.id);
+                            }
+                            setNotice("Class successfully frozen and permanently removed from all calculations.");
+                            setConfirmFreeze(false);
+                          } catch (err: any) {
+                            setError(err?.message || "Could not freeze class.");
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        {busy ? "Freezing..." : "Yes, Permanently Freeze Class"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs h-8"
+                        disabled={busy}
+                        onClick={() => setConfirmFreeze(false)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full text-xs text-rose-700 border-rose-200 hover:bg-rose-100 hover:text-rose-800 dark:text-rose-400 dark:border-rose-800"
+                    onClick={() => setConfirmFreeze(true)}
+                    disabled={busy}
+                  >
+                    <Snowflake className="h-3.5 w-3.5 mr-1.5 text-rose-600" /> Permanently Freeze Class
+                  </Button>
+                )}
               </div>
             )}
 
             {/* ERP uneditable check (Available always for one time only) */}
-            {session.personalStatus !== "frozen" && (session.erpStatus !== null && session.erpStatus !== undefined) ? (
+            {!isFrozen && (session.erpStatus !== null && session.erpStatus !== undefined) ? (
               <div className="rounded-lg bg-card p-3 border text-xs">
-                {/* ... existing ERP finalized ... */}
+                <p className="font-medium text-foreground flex items-center gap-1.5">
+                  <ShieldCheck className="h-4 w-4 text-primary" /> ERP Record Finalized
+                </p>
+                <p className="text-muted-foreground text-[11px] mt-0.5">
+                  ERP status has been permanently recorded as <strong>{session.erpStatus}</strong> and cannot be altered.
+                </p>
               </div>
-            ) : session.personalStatus !== "frozen" ? (
+            ) : !isFrozen ? (
               <div className="space-y-2 pt-1">
-                 {/* ... existing ERP buttons ... */}
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`text-xs font-medium ${
+                      stagedErpStatus === "Present"
+                        ? "bg-emerald-600 text-white border-emerald-600"
+                        : "border-emerald-500/40 hover:bg-emerald-50 text-emerald-700 dark:hover:bg-emerald-950/30"
+                    }`}
+                    disabled={busy}
+                    onClick={() => handleStageErp("Present")}
+                  >
+                    <Check className="mr-1.5 h-3.5 w-3.5" /> Present on ERP
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`text-xs font-medium ${
+                      stagedErpStatus === "Absent"
+                        ? "bg-rose-600 text-white border-rose-600"
+                        : "border-rose-500/40 hover:bg-rose-50 text-rose-700 dark:hover:bg-rose-950/30"
+                    }`}
+                    disabled={busy}
+                    onClick={() => handleStageErp("Absent")}
+                  >
+                    <X className="mr-1.5 h-3.5 w-3.5" /> Absent on ERP
+                  </Button>
+                </div>
+                <p className="text-[10px] text-muted-foreground text-center">
+                  Once saved, ERP status is permanent and uneditable.
+                </p>
               </div>
             ) : null}
           </div>
@@ -1541,7 +1643,7 @@ function AttendanceCardDialog({
               </div>
               <div className="rounded-lg bg-muted/40 p-2.5">
                 <span className="text-muted-foreground block text-[10px] uppercase font-medium">Personal (AttendWise)</span>
-                <span className="font-semibold block mt-0.5 capitalize">{session.personalStatus}</span>
+                <span className="font-semibold block mt-0.5 capitalize">{isFrozen ? "Class Frozen (Excluded)" : session.personalStatus}</span>
               </div>
               <div className="rounded-lg bg-muted/40 p-2.5">
                 <span className="text-muted-foreground block text-[10px] uppercase font-medium">ERP Status</span>
@@ -1549,7 +1651,7 @@ function AttendanceCardDialog({
               </div>
               <div className="rounded-lg bg-muted/40 p-2.5">
                 <span className="text-muted-foreground block text-[10px] uppercase font-medium">Finalization</span>
-                <span className="font-semibold block mt-0.5">{session.finalized ? "Finalized" : "Pending"}</span>
+                <span className="font-semibold block mt-0.5">{isFrozen ? "Frozen & Cancelled" : session.finalized ? "Finalized" : "Pending"}</span>
               </div>
             </div>
 
@@ -1585,14 +1687,16 @@ function AttendanceCardDialog({
           <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} className="text-xs">
             Close
           </Button>
-          <Button
-            size="sm"
-            className="text-xs font-semibold bg-primary text-primary-foreground shadow-xs gap-1.5"
-            disabled={busy}
-            onClick={handleSaveAllStatus}
-          >
-            <Check className="h-4 w-4" /> Save Status
-          </Button>
+          {!isFrozen ? (
+            <Button
+              size="sm"
+              className="text-xs font-semibold bg-primary text-primary-foreground shadow-xs gap-1.5"
+              disabled={busy}
+              onClick={handleSaveAllStatus}
+            >
+              <Check className="h-4 w-4" /> Save Status
+            </Button>
+          ) : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1608,6 +1712,7 @@ function Dashboard({
   onRecordErp,
   onMarkPresent,
   onMarkAbsent,
+  onFreezeClass,
 }: {
   user: FirebaseUser;
   profile?: StudentProfile | null;
@@ -1616,6 +1721,7 @@ function Dashboard({
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
   onMarkPresent?: (sessionId: string, photoUrl?: string) => Promise<void>;
   onMarkAbsent?: (sessionId: string) => Promise<void>;
+  onFreezeClass?: (sessionId: string) => Promise<void>;
 }) {
   const [selectedCardSession, setSelectedCardSession] = useState<ClassSessionItem | null>(null);
   const [cardDialogOpen, setCardDialogOpen] = useState(false);
@@ -1814,15 +1920,20 @@ function Dashboard({
               {todaySessions.map((session) => {
                 const startMs = new Date(session.scheduledStartAt).getTime();
                 const endMs = new Date(session.scheduledEndAt).getTime();
-                const inWindow = !session.finalized && nowMs >= startMs && nowMs < endMs;
-                const isWindowOverdue = nowMs >= endMs || session.personalStatus === "absent";
+                const isFrozen = session.personalStatus === "frozen";
+                const inWindow = !isFrozen && !session.finalized && nowMs >= startMs && nowMs < endMs;
+                const isWindowOverdue = !isFrozen && (nowMs >= endMs || session.personalStatus === "absent");
                 const statusLabel = sessionStatusLabel(session);
 
                 return (
                   <div
                     key={session.id}
                     className={`rounded-xl border p-4 transition-all hover:border-primary/50 bg-card flex flex-col justify-between gap-3 shadow-xs ${
-                      inWindow ? "border-emerald-500/50 bg-emerald-500/5 ring-1 ring-emerald-500/20" : ""
+                      isFrozen
+                        ? "border-sky-500/30 bg-sky-500/5 dark:bg-sky-950/20"
+                        : inWindow
+                        ? "border-emerald-500/50 bg-emerald-500/5 ring-1 ring-emerald-500/20"
+                        : ""
                     }`}
                   >
                     <div>
@@ -1866,10 +1977,23 @@ function Dashboard({
 
                     <Button
                       size="sm"
-                      className="w-full text-xs font-semibold h-8 shadow-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground"
+                      variant={isFrozen ? "outline" : "default"}
+                      className={`w-full text-xs font-semibold h-8 shadow-xs gap-1.5 ${
+                        isFrozen
+                          ? "border-sky-500/40 text-sky-800 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-950/40"
+                          : "bg-primary hover:bg-primary/90 text-primary-foreground"
+                      }`}
                       onClick={() => handleOpenAttendanceCard(session)}
                     >
-                      <TableProperties className="h-3.5 w-3.5" /> Enter Attendance Card
+                      {isFrozen ? (
+                        <>
+                          <Snowflake className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" /> View Frozen Card
+                        </>
+                      ) : (
+                        <>
+                          <TableProperties className="h-3.5 w-3.5" /> Enter Attendance Card
+                        </>
+                      )}
                     </Button>
                   </div>
                 );
@@ -1955,6 +2079,7 @@ function Dashboard({
                   <SelectItem value="upcoming">Upcoming</SelectItem>
                   <SelectItem value="present">Present</SelectItem>
                   <SelectItem value="absent">Absent</SelectItem>
+                  <SelectItem value="frozen">Class Frozen (Excluded)</SelectItem>
                   <SelectItem value="cancelled">Cancelled</SelectItem>
                 </SelectContent>
               </Select>
@@ -2102,6 +2227,22 @@ function Dashboard({
         onRecordErp={onRecordErp}
         onMarkPresent={onMarkPresent}
         onMarkAbsent={onMarkAbsent}
+        onFreezeClass={async (sid) => {
+          if (onFreezeClass) {
+            await onFreezeClass(sid);
+          }
+          setSelectedCardSession((prev) =>
+            prev && prev.id === sid
+              ? {
+                  ...prev,
+                  personalStatus: "frozen",
+                  finalized: true,
+                  frozenAt: new Date().toISOString(),
+                  finalizedAt: new Date().toISOString(),
+                }
+              : prev
+          );
+        }}
       />
     </>
   );
@@ -2500,6 +2641,7 @@ function AttendanceHistory({
   onRecordErp,
   onMarkPresent,
   onMarkAbsent,
+  onFreezeClass,
 }: {
   user?: FirebaseUser | null;
   sessions: ClassSessionItem[];
@@ -2507,6 +2649,7 @@ function AttendanceHistory({
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
   onMarkPresent?: (sessionId: string, photoUrl?: string) => Promise<void>;
   onMarkAbsent?: (sessionId: string) => Promise<void>;
+  onFreezeClass?: (sessionId: string) => Promise<void>;
 }) {
   const [selectedSession, setSelectedSession] = useState<ClassSessionItem | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -2635,6 +2778,7 @@ function AttendanceHistory({
                 <SelectItem value="upcoming">Upcoming</SelectItem>
                 <SelectItem value="present">Present</SelectItem>
                 <SelectItem value="absent">Absent</SelectItem>
+                <SelectItem value="frozen">Class Frozen (Excluded)</SelectItem>
                 <SelectItem value="cancelled">Cancelled</SelectItem>
               </SelectContent>
             </Select>
@@ -2785,6 +2929,22 @@ function AttendanceHistory({
           onRecordErp={onRecordErp}
           onMarkPresent={onMarkPresent}
           onMarkAbsent={onMarkAbsent}
+          onFreezeClass={async (sid) => {
+            if (onFreezeClass) {
+              await onFreezeClass(sid);
+            }
+            setSelectedSession((prev) =>
+              prev && prev.id === sid
+                ? {
+                    ...prev,
+                    personalStatus: "frozen",
+                    finalized: true,
+                    frozenAt: new Date().toISOString(),
+                    finalizedAt: new Date().toISOString(),
+                  }
+                : prev
+            );
+          }}
         />
       ) : null}
     </>
@@ -2854,12 +3014,10 @@ function Subjects({
   };
 
   const removeSubject = async (sub: SubjectItem) => {
-    if (window.confirm(`Delete ${sub.name}?`)) {
-      try {
-        await deleteDoc(doc(db, "users", user.uid, "subjects", sub.id));
-      } catch (err: any) {
-        setError(err?.message || "Could not delete subject.");
-      }
+    try {
+      await deleteDoc(doc(db, "users", user.uid, "subjects", sub.id));
+    } catch (err: any) {
+      setError(err?.message || "Could not delete subject.");
     }
   };
 
@@ -2878,11 +3036,12 @@ function Subjects({
       <div className="grid gap-4 sm:grid-cols-2">
         {subjects.map((sub) => {
           const subSessions = sessions.filter(
-            (s) => s.subjectId === sub.id && s.finalized && (s.personalStatus === "present" || s.personalStatus === "absent")
+            (s) => s.subjectId === sub.id && s.finalized && s.personalStatus !== "frozen" && (s.personalStatus === "present" || s.personalStatus === "absent")
           );
           const present = subSessions.filter((s) => s.personalStatus === "present").length;
           const total = subSessions.length;
-          const pct = total === 0 ? null : Math.round((present / total) * 100);
+          const pct = total === 0 ? null : Math.round((present / total) * 1000) / 10;
+          const frozenCount = sessions.filter((s) => s.subjectId === sub.id && s.personalStatus === "frozen").length;
 
           return (
             <Card key={sub.id}>
@@ -2894,6 +3053,11 @@ function Subjects({
                       <Badge variant="outline" className="font-mono text-xs">
                         {sub.code}
                       </Badge>
+                      {frozenCount > 0 ? (
+                        <span className="text-[10px] text-sky-700 bg-sky-50 dark:bg-sky-950/40 dark:text-sky-300 px-1.5 py-0.5 rounded border border-sky-200 flex items-center gap-1">
+                          <Snowflake className="h-2.5 w-2.5" /> {frozenCount} Frozen (Excluded)
+                        </span>
+                      ) : null}
                       {sub.reviewNeeded ? (
                         <span className="text-[10px] text-amber-700 bg-amber-50 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-0.5 rounded border border-amber-200">
                           PDF abbreviation
@@ -3013,10 +3177,13 @@ function Subjects({
 function Comparison({
   user,
   sessions,
+  onRecordErp,
+  onFreezeClass,
 }: {
   user: FirebaseUser;
   sessions: ClassSessionItem[];
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
+  onFreezeClass?: (sessionId: string) => Promise<void>;
 }) {
   const [selectedSession, setSelectedSession] = useState<ClassSessionItem | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -3174,6 +3341,23 @@ function Comparison({
         onOpenChange={setDialogOpen}
         session={selectedSession}
         user={user}
+        onRecordErp={onRecordErp}
+        onFreezeClass={async (sid) => {
+          if (onFreezeClass) {
+            await onFreezeClass(sid);
+          }
+          setSelectedSession((prev) =>
+            prev && prev.id === sid
+              ? {
+                  ...prev,
+                  personalStatus: "frozen",
+                  finalized: true,
+                  frozenAt: new Date().toISOString(),
+                  finalizedAt: new Date().toISOString(),
+                }
+              : prev
+          );
+        }}
       />
     </>
   );
@@ -3783,7 +3967,7 @@ function ProfileView({
 
 // Router and Main Application
 export default function App() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<AppStudentUser | FirebaseUser | null>(() => getStoredActiveSession());
   const [authLoading, setAuthLoading] = useState(true);
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
@@ -3794,23 +3978,25 @@ export default function App() {
   // Listen to Firebase Auth state
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
-      setUser(currentUser);
-      setAuthLoading(false);
-
       if (currentUser) {
-        // Ensure authentic SISTec timetable and subjects are loaded in Firestore
+        setUser(currentUser);
+        setAuthLoading(false);
         try {
           await ensureSistecTimetableLoaded(currentUser.uid);
         } catch (err) {
           console.error("Failed to load initial SISTec timetable:", err);
         }
+      } else {
+        const local = getStoredActiveSession();
+        setUser(local);
+        setAuthLoading(false);
       }
     });
 
     return () => unsubscribe();
   }, []);
 
-  // Listen to Firestore data when user is authenticated
+  // Listen to Firestore data when user is authenticated with Firebase, or initialize local SISTec data
   useEffect(() => {
     if (!user) {
       setProfile(null);
@@ -3820,75 +4006,98 @@ export default function App() {
       return;
     }
 
-    // 1. Profile listener
-    const unsubProfile = onSnapshot(
-      doc(db, "users", user.uid),
-      (snap) => {
-        if (snap.exists()) {
-          setProfile(snap.data() as StudentProfile);
-        }
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, `users/${user.uid}`);
-      }
-    );
-
-    // 2. Subjects listener
-    const unsubSubjects = onSnapshot(
-      collection(db, "users", user.uid, "subjects"),
-      (snap) => {
-        const list: SubjectItem[] = [];
-        snap.forEach((d) => list.push(d.data() as SubjectItem));
-        setSubjects(list);
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, `users/${user.uid}/subjects`);
-      }
-    );
-
-    // 3. Timetable listener
-    const unsubTimetable = onSnapshot(
-      collection(db, "users", user.uid, "timetableEntries"),
-      (snap) => {
-        const list: TimetableItem[] = [];
-        snap.forEach((d) => list.push(d.data() as TimetableItem));
-        setTimetable(list);
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, `users/${user.uid}/timetableEntries`);
-      }
-    );
-
-    // 4. Class sessions listener
-    const unsubSessions = onSnapshot(
-      collection(db, "users", user.uid, "classSessions"),
-      (snap) => {
-        const list: ClassSessionItem[] = [];
-        snap.forEach((d) => {
-          const item = d.data() as ClassSessionItem;
-          if (isTeachingDay(item.scheduledDate)) {
-            list.push(item);
+    if (auth.currentUser) {
+      // 1. Profile listener
+      const unsubProfile = onSnapshot(
+        doc(db, "users", user.uid),
+        (snap) => {
+          if (snap.exists()) {
+            setProfile(snap.data() as StudentProfile);
           }
-        });
-        setSessions(list);
-        // Auto-finalize any overdue sessions
-        void finalizeExpiredSessionsForStudent(user.uid, list);
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, `users/${user.uid}/classSessions`);
-      }
-    );
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.GET, `users/${user.uid}`);
+        }
+      );
 
-    return () => {
-      unsubProfile();
-      unsubSubjects();
-      unsubTimetable();
-      unsubSessions();
-    };
+      // 2. Subjects listener
+      const unsubSubjects = onSnapshot(
+        collection(db, "users", user.uid, "subjects"),
+        (snap) => {
+          const list: SubjectItem[] = [];
+          snap.forEach((d) => list.push(d.data() as SubjectItem));
+          setSubjects(list);
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.GET, `users/${user.uid}/subjects`);
+        }
+      );
+
+      // 3. Timetable listener
+      const unsubTimetable = onSnapshot(
+        collection(db, "users", user.uid, "timetableEntries"),
+        (snap) => {
+          const list: TimetableItem[] = [];
+          snap.forEach((d) => list.push(d.data() as TimetableItem));
+          setTimetable(list);
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.GET, `users/${user.uid}/timetableEntries`);
+        }
+      );
+
+      // 4. Class sessions listener
+      const unsubSessions = onSnapshot(
+        collection(db, "users", user.uid, "classSessions"),
+        (snap) => {
+          const list: ClassSessionItem[] = [];
+          snap.forEach((d) => {
+            const item = d.data() as ClassSessionItem;
+            if (isTeachingDay(item.scheduledDate)) {
+              list.push(item);
+            }
+          });
+          setSessions(list);
+          void finalizeExpiredSessionsForStudent(user.uid, list);
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.GET, `users/${user.uid}/classSessions`);
+        }
+      );
+
+      return () => {
+        unsubProfile();
+        unsubSubjects();
+        unsubTimetable();
+        unsubSessions();
+      };
+    } else {
+      // Local student vault initialization (guarantees zero permission errors)
+      setProfile({
+        id: user.uid,
+        displayName: user.displayName || "Student",
+        email: user.email || "",
+        timezone: TIMEZONE,
+        attendanceTarget: 75,
+        institution: SISTEC_METADATA.institution,
+        course: SISTEC_METADATA.course,
+        createdAt: new Date().toISOString(),
+      });
+
+      const { subjects: s, timetable: t, sessions: sess } = buildDefaultSistecData(user.uid);
+      setSubjects(s);
+      setTimetable(t);
+      setSessions(sess);
+    }
   }, [user]);
 
   const handleLogout = async () => {
-    await logOutStudent();
+    await logoutStudentUser();
+    setUser(null);
+    setProfile(null);
+    setSubjects([]);
+    setTimetable([]);
+    setSessions([]);
     setLocation("/");
   };
 
@@ -3899,7 +4108,7 @@ export default function App() {
       prev.map((s) => (s.id === sessionId ? { ...s, erpStatus: status } : s))
     );
     // 2. Persist to Firestore:
-    if (user) {
+    if (user && auth.currentUser) {
       await recordSessionErpStatus(user.uid, sessionId, status);
     }
   };
@@ -3921,7 +4130,7 @@ export default function App() {
       )
     );
     // 2. Persist to Firestore:
-    if (user) {
+    if (user && auth.currentUser) {
       await markSessionPresent(user.uid, sessionId, photoUrl);
     }
   };
@@ -3940,8 +4149,30 @@ export default function App() {
           : s
       )
     );
-    if (user) {
+    if (user && auth.currentUser) {
       await markSessionAbsent(user.uid, sessionId);
+    }
+  };
+
+  const handleFreezeClassQuick = async (sessionId: string) => {
+    const nowIso = new Date().toISOString();
+    // 1. Instant optimistic update across all sessions in real-time
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              personalStatus: "frozen",
+              finalized: true,
+              frozenAt: nowIso,
+              finalizedAt: nowIso,
+            }
+          : s
+      )
+    );
+    // 2. Persist to Firestore / IndexedDB cache
+    if (user) {
+      await freezeClassSession(user.uid, sessionId);
     }
   };
 
@@ -3974,6 +4205,7 @@ export default function App() {
                     onRecordErp={handleRecordErp}
                     onMarkPresent={handleMarkPresentQuick}
                     onMarkAbsent={handleMarkAbsentQuick}
+                    onFreezeClass={handleFreezeClassQuick}
                   />
                 )}
               />
@@ -3988,6 +4220,7 @@ export default function App() {
                     onRecordErp={handleRecordErp}
                     onMarkPresent={handleMarkPresentQuick}
                     onMarkAbsent={handleMarkAbsentQuick}
+                    onFreezeClass={handleFreezeClassQuick}
                   />
                 )}
               />
@@ -4006,6 +4239,7 @@ export default function App() {
                     onRecordErp={handleRecordErp}
                     onMarkPresent={handleMarkPresentQuick}
                     onMarkAbsent={handleMarkAbsentQuick}
+                    onFreezeClass={handleFreezeClassQuick}
                   />
                 )}
               />
@@ -4016,7 +4250,7 @@ export default function App() {
               <Route
                 path="/comparison"
                 component={() => (
-                  <Comparison user={user} sessions={sessions} />
+                  <Comparison user={user} sessions={sessions} onRecordErp={handleRecordErp} onFreezeClass={handleFreezeClassQuick} />
                 )}
               />
               <Route

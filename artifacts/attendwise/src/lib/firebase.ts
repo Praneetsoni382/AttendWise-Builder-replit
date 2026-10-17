@@ -427,6 +427,108 @@ export async function ensureSistecTimetableLoaded(uid: string): Promise<void> {
   }
 }
 
+// Build default authentic SISTec subjects, timetable entries, and sessions
+export function buildDefaultSistecData(uid: string): {
+  subjects: SubjectItem[];
+  timetable: TimetableItem[];
+  sessions: ClassSessionItem[];
+} {
+  const subjectMap = new Map<string, SubjectItem>();
+  const subjects: SubjectItem[] = SISTEC_SUBJECTS.map((sub) => {
+    const item: SubjectItem = {
+      id: sub.id,
+      studentId: uid,
+      code: sub.code,
+      name: sub.name,
+      category: sub.category,
+      teacherName: null,
+      iconKey: sub.iconKey,
+      reviewNeeded: sub.reviewNeeded ?? false,
+      notes: sub.notes ?? null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    subjectMap.set(sub.id, item);
+    return item;
+  });
+
+  let entryIndex = 1;
+  const timetable: TimetableItem[] = SISTEC_TIMETABLE_SLOTS.map((slotSeed) => {
+    const sub = subjectMap.get(slotSeed.subjectId);
+    const entryId = `entry-${slotSeed.dayOfWeek}-${slotSeed.slot}-${entryIndex++}`;
+    return {
+      id: entryId,
+      studentId: uid,
+      subjectId: slotSeed.subjectId,
+      subjectName: sub?.name ?? "Subject",
+      subjectCode: sub?.code ?? "CODE",
+      slot: slotSeed.slot,
+      dayOfWeek: slotSeed.dayOfWeek,
+      startTime: slotSeed.startTime,
+      endTime: slotSeed.endTime,
+      category: slotSeed.category,
+      room: slotSeed.room ?? (slotSeed.category === "Practical" ? "Lab" : "Classroom"),
+      teacherName: null,
+      active: true,
+      sourceId: "sistec-timetable-2026",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  });
+
+  const now = new Date();
+  const sessions: ClassSessionItem[] = [];
+
+  for (let dayOffset = -7; dayOffset <= 14; dayOffset++) {
+    const d = new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000);
+    const weekday = getWeekdayIST(d);
+    if (weekday === 7) continue;
+
+    const dateKey = formatDateKey(d);
+    if (!isTeachingDay(dateKey)) continue;
+
+    const academicDay = getTeachingDayNumber(dateKey);
+    const matchingEntries = timetable.filter((e) => e.active && e.dayOfWeek === weekday);
+
+    for (const entry of matchingEntries) {
+      const sessionId = `session-${entry.id}-${dateKey}`;
+      const startAt = makeIstDateTime(dateKey, entry.startTime);
+      const endAt = makeIstDateTime(dateKey, entry.endTime);
+      const isOverdue = now.getTime() >= endAt.getTime();
+      const initialStatus = isOverdue ? "absent" : "upcoming";
+      const isFinalized = isOverdue;
+
+      sessions.push({
+        id: sessionId,
+        studentId: uid,
+        subjectId: entry.subjectId,
+        subjectName: entry.subjectName,
+        subjectCode: entry.subjectCode,
+        timetableEntryId: entry.id,
+        slot: entry.slot,
+        scheduledDate: dateKey,
+        scheduledStartAt: startAt.toISOString(),
+        scheduledEndAt: endAt.toISOString(),
+        category: entry.category,
+        room: entry.room ?? null,
+        personalStatus: initialStatus,
+        erpStatus: null,
+        note: null,
+        finalized: isFinalized,
+        finalizedAt: isFinalized ? endAt.toISOString() : null,
+        serverReceiptAt: null,
+        clientCaptureAt: null,
+        cancelledAt: null,
+        evidenceAvailable: false,
+        academicDayNumber: academicDay,
+        createdAt: now.toISOString(),
+      });
+    }
+  }
+
+  return { subjects, timetable, sessions };
+}
+
 // Generate active upcoming class sessions strictly according to SISTec Academic Calendar
 export async function generateWeeklySessions(uid: string): Promise<void> {
   const timetableRef = collection(db, "users", uid, "timetableEntries");
@@ -817,46 +919,57 @@ export async function finalizeExpiredSessionsForStudent(
   }
 }
 
-import { setCachedStore } from "./idb-cache";
+import { getCachedStore, setCachedStore } from "./idb-cache";
 import { collection, getDocs, query, orderBy } from "firebase/firestore";
 
 // Freeze class session (permanently removed from all calculations)
 export async function freezeClassSession(uid: string, sessionId: string): Promise<void> {
-  const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
-  const sessionSnap = await getDoc(sessionRef);
-
-  if (!sessionSnap.exists()) {
-    throw new Error("Class session not found.");
-  }
-
-  const session = sessionSnap.data() as ClassSessionItem;
-  if (session.personalStatus === "frozen") {
-    throw new Error("Class is already frozen.");
-  }
-
   const now = new Date().toISOString();
-  await updateDoc(sessionRef, {
-    personalStatus: "frozen",
-    finalized: true,
-    frozenAt: now,
-    finalizedAt: now,
-  });
 
-  const eventRef = doc(db, "users", uid, "attendanceEvents", `event-freeze-${sessionId}-${Date.now()}`);
-  await setDoc(eventRef, {
-    id: `event-freeze-${sessionId}-${Date.now()}`,
-    sessionId,
-    eventType: "session_frozen",
-    serverTimestamp: now,
-    message: "Class session frozen and excluded from all calculations.",
-  });
+  // 1. Persist to Firestore if online & authenticated
+  if (auth.currentUser && !uid.startsWith("local-")) {
+    try {
+      const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
+      await updateDoc(sessionRef, {
+        personalStatus: "frozen",
+        finalized: true,
+        frozenAt: now,
+        finalizedAt: now,
+      });
 
-  // Force cache refresh
-  const sessionsRef = collection(db, "users", uid, "classSessions");
-  const sessionsSnap = await getDocs(query(sessionsRef, orderBy("scheduledStartAt", "asc")));
-  const sessions: ClassSessionItem[] = [];
-  sessionsSnap.forEach((d) => sessions.push(d.data() as ClassSessionItem));
-  await setCachedStore("sessions", sessions);
+      const eventRef = doc(db, "users", uid, "attendanceEvents", `event-freeze-${sessionId}-${Date.now()}`);
+      await setDoc(eventRef, {
+        id: `event-freeze-${sessionId}-${Date.now()}`,
+        sessionId,
+        eventType: "session_frozen",
+        serverTimestamp: now,
+        message: "Class session permanently frozen and excluded from all calculations.",
+      });
+    } catch (e) {
+      console.warn("Firestore update error in freezeClassSession:", e);
+    }
+  }
+
+  // 2. Always persist to IndexedDB local cache so it survives refreshes & offline
+  try {
+    const cachedSessions = await getCachedStore<ClassSessionItem>("sessions");
+    if (cachedSessions && cachedSessions.length > 0) {
+      const updated = cachedSessions.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              personalStatus: "frozen" as const,
+              finalized: true,
+              frozenAt: now,
+              finalizedAt: now,
+            }
+          : s
+      );
+      await setCachedStore("sessions", updated);
+    }
+  } catch (err) {
+    console.warn("IDB cache update error in freezeClassSession:", err);
+  }
 }
 
 // Attendance calculations adhering strictly to Part 7:
@@ -923,4 +1036,13 @@ export function computeAttendanceStats(sessions: ClassSessionItem[]) {
     totalFinalized: eligible.length,
     upcomingCount: sessions.filter((s) => !s.finalized && s.personalStatus === "upcoming").length,
   };
+}
+export async function uploadSessionPhoto(
+  uid: string,
+  sessionId: string,
+  photoDataUrl: string
+): Promise<string> {
+  const storageRef = ref(storage, `users/${uid}/attendance/${sessionId}/${Date.now()}.jpg`);
+  await uploadString(storageRef, photoDataUrl, "data_url");
+  return await getDownloadURL(storageRef);
 }
