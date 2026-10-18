@@ -79,6 +79,8 @@ import {
   type ClassSessionItem,
   type AttendanceEventItem,
 } from "./lib/firebase";
+import { computeFullAnalytics } from "./lib/analytics-calculator";
+import { useCamera } from "./hooks/useCamera";
 import {
   registerStudent,
   loginStudent,
@@ -438,31 +440,31 @@ function Shell({
       <aside
         className={`${
           mobileNav ? "block" : "hidden"
-        } fixed inset-y-0 left-0 z-40 w-72 border-r bg-card p-5 md:sticky md:top-0 md:block md:h-screen md:w-64 md:shrink-0 flex flex-col justify-between`}
+        } fixed inset-y-0 left-0 z-40 w-72 border-r border-slate-800 bg-slate-950 p-6 md:sticky md:top-0 md:block md:h-screen md:w-64 md:shrink-0 flex flex-col justify-between`}
       >
         <div>
-          <Link href="/dashboard" className="mb-8 flex items-center gap-3 rounded-md font-semibold" data-testid="link-brand">
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-              <GraduationCap className="h-6 w-6" />
+          <Link href="/dashboard" className="mb-10 flex items-center gap-3 font-semibold text-white" data-testid="link-brand">
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 shadow-lg shadow-indigo-600/30">
+              <GraduationCap className="h-6 w-6 text-white" />
             </span>
             <div className="min-w-0">
               <span className="text-lg font-bold tracking-tight block leading-tight">AttendWise</span>
-              <span className="block text-xs font-normal text-muted-foreground truncate">
+              <span className="block text-[11px] font-normal text-indigo-300 truncate">
                 SISTec · AIDS 3 Sem
               </span>
             </div>
           </Link>
-          <nav className="space-y-1" aria-label="Main navigation">
+          <nav className="space-y-1.5" aria-label="Main navigation">
             {navItems.map(({ href, title, icon: Icon }) => (
               <Link
                 key={href}
                 href={href}
                 onClick={() => setMobileNav(false)}
                 data-testid={`link-nav-${href.slice(1)}`}
-                className={`flex min-h-10 items-center gap-3 rounded-md px-3 text-sm font-medium transition-colors ${
+                className={`flex min-h-11 items-center gap-3 rounded-2xl px-4 text-sm font-medium transition-all duration-200 ${
                   path === href || (href === "/history" && path.startsWith("/session/"))
-                    ? "bg-primary text-primary-foreground shadow-xs"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/20"
+                    : "text-slate-400 hover:bg-slate-800/60 hover:text-white"
                 }`}
               >
                 <Icon className="h-4 w-4" />
@@ -471,21 +473,21 @@ function Shell({
             ))}
           </nav>
 
-          <div className="mt-8 rounded-lg border bg-muted/40 p-3.5 text-xs text-muted-foreground">
-            <div className="flex items-center gap-1.5 font-medium text-foreground mb-1">
-              <ShieldCheck className="h-3.5 w-3.5 text-accent-foreground" />
+          <div className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-4 text-xs text-slate-400">
+            <div className="flex items-center gap-1.5 font-medium text-emerald-400 mb-1">
+              <ShieldCheck className="h-3.5 w-3.5" />
               <span>Firebase Synced</span>
             </div>
-            <p className="leading-relaxed">
+            <p className="leading-relaxed text-[11px]">
               Real-time Firestore storage. Timetable sourced from SISTec 16/10/2026 report.
             </p>
           </div>
         </div>
 
-        <div className="mt-6 flex items-center justify-between rounded-lg border bg-card p-3 shadow-xs">
+        <div className="mt-6 flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900 p-3 shadow-inner">
           <div className="min-w-0 flex-1 mr-2">
-            <p className="truncate text-sm font-semibold">{profile?.displayName || "Student"}</p>
-            <p className="truncate text-xs text-muted-foreground">{profile?.email || "Authenticated"}</p>
+            <p className="truncate text-xs font-semibold text-white">{profile?.displayName || "Student"}</p>
+            <p className="truncate text-[10px] text-slate-400">{profile?.email || "Authenticated"}</p>
           </div>
           <Button
             variant="ghost"
@@ -494,8 +496,9 @@ function Shell({
             title="Sign out"
             onClick={onLogout}
             data-testid="button-exit-demo"
+            className="text-slate-400 hover:text-rose-400"
           >
-            <LogOut className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+            <LogOut className="h-4 w-4" />
           </Button>
         </div>
       </aside>
@@ -923,13 +926,21 @@ function AttendanceCardDialog({
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [cameraActive, setCameraActive] = useState(false);
-  const [capturedPhotoUrl, setCapturedPhotoUrl] = useState<string | null>(null);
   const [events, setEvents] = useState<AttendanceEventItem[]>([]);
   const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null);
   const [noteInput, setNoteInput] = useState(session?.note || "");
   const [evidencePhotoUrl, setEvidencePhotoUrl] = useState<string | null>(null);
   const [confirmFreeze, setConfirmFreeze] = useState(false);
+  const [capturedPhotoUrl, setCapturedPhotoUrl] = useState<string | null>(null);
+  
+  const { 
+    videoRef, 
+    stream,
+    startCamera, 
+    stopCamera, 
+    cameraError, 
+    isLoading: cameraLoading 
+  } = useCamera({ idealFacingMode: "user" });
 
   useEffect(() => {
     if (!open || !session || !user || !session.evidenceAvailable || !auth.currentUser) {
@@ -971,9 +982,6 @@ function AttendanceCardDialog({
     }
   };
 
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-
   const todayKey = formatDateKey(new Date());
   const isToday = session?.scheduledDate === todayKey;
 
@@ -1003,15 +1011,11 @@ function AttendanceCardDialog({
   // Clean camera stream on modal close
   useEffect(() => {
     if (!open) {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-      setCameraActive(false);
+      stopCamera();
       setNotice(null);
       setError(null);
     }
-  }, [open]);
+  }, [open, stopCamera]);
 
   // Listen to authoritative attendance events in Firestore
   useEffect(() => {
@@ -1035,33 +1039,6 @@ function AttendanceCardDialog({
     return () => unsub();
   }, [open, session?.id, user?.uid]);
 
-  const startCamera = async () => {
-    setError(null);
-    try {
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
-        });
-      } catch {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      }
-      streamRef.current = stream;
-      setCameraActive(true);
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play().catch((e) => console.warn("Video play error:", e));
-        }
-      }, 150);
-    } catch {
-      setError(
-        "Camera access was denied or no camera was found. Please allow camera permissions in your browser address bar / iframe settings."
-      );
-      setCameraActive(false);
-    }
-  };
-
   const snapPhoto = () => {
     if (!videoRef.current) return;
     const canvas = document.createElement("canvas");
@@ -1071,14 +1048,16 @@ function AttendanceCardDialog({
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+      
+      // Add server-side timestamp to evidence metadata
+      const capturedAt = new Date().toISOString(); 
       setCapturedPhotoUrl(dataUrl);
+      // In a real app, you'd store this 'capturedAt' with the photo metadata
+      console.log("Photo captured at:", capturedAt);
     }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    setCameraActive(false);
+    stopCamera();
   };
+
 
   const [stagedPersonalStatus, setStagedPersonalStatus] = useState<string | null>(null);
   const [stagedErpStatus, setStagedErpStatus] = useState<string | null>(null);
@@ -1297,7 +1276,7 @@ function AttendanceCardDialog({
                   <span>Permanent & Immutable · No further attendance or ERP changes allowed</span>
                 </div>
               </div>
-            ) : inWindow && session.personalStatus === "upcoming" ? (
+            ) : inWindow ? (
               <div className="space-y-3 pt-2">
                 {/* Optional live camera capture matching image */}
                 <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
@@ -1308,7 +1287,7 @@ function AttendanceCardDialog({
                     <span className="text-[10px] text-muted-foreground">Capture helps validate privacy</span>
                   </div>
 
-                  {cameraActive ? (
+                  {stream ? (
                     <div className="space-y-2">
                       <video
                         ref={videoRef}
@@ -1819,21 +1798,30 @@ function Dashboard({
 
   return (
     <>
-      <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Good day, {profile?.displayName?.split(" ")[0] || "Student"}.
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Your SISTec college attendance and class session dashboard.
-          </p>
+      {/* Header Area matching reference design */}
+      <div className="mb-8 p-6 sm:p-8 rounded-3xl bg-indigo-950 text-white shadow-xl relative overflow-hidden">
+        <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+          <div className="space-y-1">
+            <h1 className="text-3xl font-extrabold tracking-tight">
+              Good day, {profile?.displayName?.split(" ")[0] || "Student"}.
+            </h1>
+            <p className="text-indigo-200 text-sm">
+              Your SISTec college attendance and class session dashboard.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <LiveServerClock />
+            <Badge variant="secondary" className="bg-indigo-800 text-indigo-100 hover:bg-indigo-700 border-none font-mono text-xs h-9 px-4">
+              <Sparkles className="mr-1.5 h-3.5 w-3.5 text-yellow-300" /> SISTec AIDS 3 Sem
+            </Badge>
+          </div>
         </div>
-        <div className="flex items-center gap-2.5 self-start sm:self-auto flex-wrap">
-          <LiveServerClock />
-          <Badge variant="outline" className="bg-muted/40 font-mono text-xs h-9">
-            <Sparkles className="mr-1 h-3 w-3 text-primary" /> SISTec AIDS 3 Sem
-          </Badge>
+        
+        {/* Decorative elements - book graphic */}
+        <div className="absolute right-6 bottom-6 opacity-10">
+          <BookOpen size={140} />
         </div>
+        <div className="absolute -left-10 -top-10 w-40 h-40 bg-indigo-800 rounded-full blur-3xl opacity-30"></div>
       </div>
 
       {actionNotice ? (
@@ -2973,6 +2961,14 @@ function Subjects({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const [currentTick, setCurrentTick] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const analytics = useMemo(() => computeFullAnalytics(sessions, currentTick), [sessions, currentTick]);
+
   const startEdit = (s?: SubjectItem) => {
     setEditing(s ?? null);
     setName(s?.name ?? "");
@@ -3028,8 +3024,8 @@ function Subjects({
   return (
     <>
       <PageHeading
-        title="College Subjects"
-        description="Official SISTec AIDS 3rd Semester subjects. Attendance is calculated from finalized sessions."
+        title="College Subjects & Attendance"
+        description="Official SISTec AIDS 3rd Semester subjects. AttendWise & ERP attendance calculated using eligible classes till present server timing."
         action={
           <Button onClick={() => startEdit()} size="sm">
             <Plus className="h-4 w-4 mr-1" /> Add Subject
@@ -3039,18 +3035,22 @@ function Subjects({
 
       <div className="grid gap-4 sm:grid-cols-2">
         {subjects.map((sub) => {
-          const subSessions = sessions.filter(
-            (s) => s.subjectId === sub.id && s.finalized && s.personalStatus !== "frozen" && (s.personalStatus === "present" || s.personalStatus === "absent")
-          );
-          const present = subSessions.filter((s) => s.personalStatus === "present").length;
-          const total = subSessions.length;
-          const pct = total === 0 ? null : Math.round((present / total) * 1000) / 10;
+          const subAna = analytics.subjects.find((s) => s.subjectId === sub.id) || {
+            subjectId: sub.id,
+            subjectName: sub.name,
+            subjectCode: sub.code,
+            category: sub.category,
+            totalEligible: 0,
+            attendwise: { percentage: null, presentCount: 0, absentCount: 0, totalEligible: 0 },
+            erp: { percentage: null, presentCount: 0, absentCount: 0, notEnteredCount: 0, totalEligible: 0 },
+          };
+
           const frozenCount = sessions.filter((s) => s.subjectId === sub.id && s.personalStatus === "frozen").length;
 
           return (
-            <Card key={sub.id}>
-              <CardContent className="p-5">
-                <div className="flex items-start justify-between">
+            <Card key={sub.id} className="shadow-xs">
+              <CardContent className="p-5 space-y-4">
+                <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="font-semibold text-base">{sub.name}</h2>
@@ -3059,7 +3059,7 @@ function Subjects({
                       </Badge>
                       {frozenCount > 0 ? (
                         <span className="text-[10px] text-sky-700 bg-sky-50 dark:bg-sky-950/40 dark:text-sky-300 px-1.5 py-0.5 rounded border border-sky-200 flex items-center gap-1">
-                          <Snowflake className="h-2.5 w-2.5" /> {frozenCount} Frozen (Excluded)
+                          <Snowflake className="h-2.5 w-2.5" /> {frozenCount} Frozen
                         </span>
                       ) : null}
                       {sub.reviewNeeded ? (
@@ -3077,39 +3077,80 @@ function Subjects({
                       {sub.category}
                     </Badge>
                   </div>
-                  <span className="text-2xl font-bold">{asPct(pct)}</span>
                 </div>
 
-                <div className="mt-4">
-                  {pct !== null ? (
-                    <Progress value={pct} aria-label={`${sub.name} attendance`} />
-                  ) : (
-                    <p className="text-xs text-muted-foreground">No finalized sessions yet</p>
-                  )}
-                  <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
-                    <div>
-                      <p className="font-semibold">{present}</p>
-                      <p className="text-muted-foreground">Present</p>
+                {/* AttendWise & ERP Attendance Comparison Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  {/* AttendWise Section */}
+                  <div className="rounded-xl border bg-muted/30 p-3.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-primary flex items-center gap-1">
+                        <ShieldCheck className="h-3.5 w-3.5" /> AttendWise
+                      </span>
+                      <span className="text-xl font-bold">{asPct(subAna.attendwise.percentage)}</span>
                     </div>
-                    <div>
-                      <p className="font-semibold">{total - present}</p>
-                      <p className="text-muted-foreground">Absent</p>
+                    {subAna.attendwise.percentage !== null ? (
+                      <Progress value={subAna.attendwise.percentage} className="h-1.5" aria-label="AttendWise attendance" />
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground">No eligible sessions yet</p>
+                    )}
+                    <div className="grid grid-cols-3 gap-1 pt-1 text-center text-[11px]">
+                      <div className="rounded bg-background/60 p-1">
+                        <p className="font-semibold text-emerald-600">{subAna.attendwise.presentCount}</p>
+                        <p className="text-[10px] text-muted-foreground">Present</p>
+                      </div>
+                      <div className="rounded bg-background/60 p-1">
+                        <p className="font-semibold text-rose-600">{subAna.attendwise.absentCount}</p>
+                        <p className="text-[10px] text-muted-foreground">Absent</p>
+                      </div>
+                      <div className="rounded bg-background/60 p-1">
+                        <p className="font-semibold">{subAna.attendwise.totalEligible}</p>
+                        <p className="text-[10px] text-muted-foreground">Eligible</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="font-semibold">{total}</p>
-                      <p className="text-muted-foreground">Finalized Total</p>
+                  </div>
+
+                  {/* College ERP Section */}
+                  <div className="rounded-xl border bg-muted/30 p-3.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-chart-2 flex items-center gap-1">
+                        <BookOpen className="h-3.5 w-3.5" /> College ERP
+                      </span>
+                      <span className="text-xl font-bold">{asPct(subAna.erp.percentage)}</span>
+                    </div>
+                    {subAna.erp.percentage !== null ? (
+                      <Progress value={subAna.erp.percentage} className="h-1.5" aria-label="ERP attendance" />
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground">No eligible sessions yet</p>
+                    )}
+                    <div className="grid grid-cols-3 gap-1 pt-1 text-center text-[11px]">
+                      <div className="rounded bg-background/60 p-1">
+                        <p className="font-semibold text-emerald-600">{subAna.erp.presentCount}</p>
+                        <p className="text-[10px] text-muted-foreground">Present</p>
+                      </div>
+                      <div className="rounded bg-background/60 p-1">
+                        <p className="font-semibold text-rose-600">{subAna.erp.absentCount}</p>
+                        <p className="text-[10px] text-muted-foreground">Absent</p>
+                      </div>
+                      <div className="rounded bg-background/60 p-1">
+                        <p className="font-semibold">{subAna.erp.notEnteredCount}</p>
+                        <p className="text-[10px] text-muted-foreground">Not Set</p>
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                <Separator className="my-4" />
-                <div className="flex justify-end gap-2">
-                  <Button variant="outline" size="sm" onClick={() => startEdit(sub)}>
-                    Edit
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => removeSubject(sub)}>
-                    Delete
-                  </Button>
+                <Separator className="my-2" />
+                <div className="flex justify-between items-center text-xs text-muted-foreground">
+                  <span>Total Eligible Classes: <strong className="text-foreground">{subAna.totalEligible}</strong></span>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => startEdit(sub)}>
+                      Edit
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive" onClick={() => removeSubject(sub)}>
+                      Delete
+                    </Button>
+                  </div>
                 </div>
               </CardContent>
             </Card>
