@@ -4430,7 +4430,7 @@ export default function App() {
           const list: ClassSessionItem[] = [];
           snap.forEach((d) => {
             const item = d.data() as ClassSessionItem;
-            if (isTeachingDay(item.scheduledDate)) {
+            if (isTeachingDay(item.scheduledDate) || item.isSpecialTraining || item.subjectId === "sub-python-training") {
               list.push(item);
             }
           });

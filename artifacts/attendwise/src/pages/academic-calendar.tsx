@@ -97,8 +97,11 @@ export default function AcademicCalendarView() {
           <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20 text-xs">
             B.Tech 3rd Sem · Session: Aug–Dec 2026
           </Badge>
+          <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30 text-xs">
+            Python Training: 11 Days · 66 Classes
+          </Badge>
           <Badge variant="outline" className="bg-muted text-xs">
-            57 Total Teaching Days
+            57 Academic Teaching Days
           </Badge>
         </div>
       </div>
@@ -118,6 +121,10 @@ export default function AcademicCalendarView() {
                   <Badge className="bg-primary text-primary-foreground text-xs font-semibold">
                     Teaching Day {todayInfo.dayNumber} of 57
                   </Badge>
+                ) : todayInfo.type === "training" ? (
+                  <Badge className="bg-amber-600 text-white text-xs font-semibold">
+                    Python Training Day {todayInfo.dayNumber} of 11 (6 Periods)
+                  </Badge>
                 ) : todayInfo.type === "holiday" ? (
                   <Badge variant="destructive" className="text-xs font-semibold">
                     Holiday: {todayInfo.title}
@@ -131,6 +138,8 @@ export default function AcademicCalendarView() {
               <p className="mt-1 text-xs text-muted-foreground">
                 {todayInfo.type === "teaching"
                   ? "Classes are scheduled per your timetable. Attendance window active during class hours."
+                  : todayInfo.type === "training"
+                  ? "Python Training day. 6 training periods scheduled. Treated as eligible regular classes."
                   : "No classes scheduled today. This day does not count toward your attendance totals."}
               </p>
             </div>
@@ -147,7 +156,18 @@ export default function AcademicCalendarView() {
       </Card>
 
       {/* Metrics Row */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <Card className="border-amber-500/20 bg-amber-500/5">
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-amber-700 dark:text-amber-300">Python Training</p>
+              <Sparkles className="h-4 w-4 text-amber-600" />
+            </div>
+            <p className="mt-2 text-2xl font-bold text-amber-600">66 Classes</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">Sept 7–19 · 11 days (6 periods/day)</p>
+          </CardContent>
+        </Card>
+
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
@@ -290,6 +310,10 @@ export default function AcademicCalendarView() {
                       <span className="text-[10px] font-mono font-semibold px-1 rounded bg-primary/10 text-primary">
                         Day {dayInfo.dayNumber}
                       </span>
+                    ) : isTraining && dayInfo.dayNumber ? (
+                      <span className="text-[10px] font-mono font-semibold px-1 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                        Day {dayInfo.dayNumber}
+                      </span>
                     ) : null}
                   </div>
 
@@ -303,8 +327,8 @@ export default function AcademicCalendarView() {
                         {dayInfo.title}
                       </p>
                     ) : isTraining ? (
-                      <p className="text-[10px] font-medium leading-tight text-amber-700 dark:text-amber-300">
-                        Training
+                      <p className="text-[10px] sm:text-[11px] font-semibold leading-tight text-amber-700 dark:text-amber-300">
+                        Python Training
                       </p>
                     ) : isTeaching ? (
                       <p className="text-[10px] text-muted-foreground hidden sm:block">6 Slots Scheduled</p>
@@ -316,6 +340,8 @@ export default function AcademicCalendarView() {
                   <div className="mt-1 flex items-center justify-between text-[9px] text-muted-foreground">
                     {isTeaching ? (
                       <span className="text-primary font-medium">Working</span>
+                    ) : isTraining ? (
+                      <span className="text-amber-700 dark:text-amber-300 font-semibold">6 Training Slots</span>
                     ) : (
                       <span>{dayInfo.dayOfWeek === 7 ? "Sunday" : "Off"}</span>
                     )}

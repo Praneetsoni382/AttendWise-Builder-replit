@@ -21,6 +21,7 @@ import {
   getDocs,
   setDoc,
   updateDoc,
+  deleteDoc,
   writeBatch,
   query,
   where,
@@ -39,6 +40,9 @@ import {
   SISTEC_METADATA,
   SISTEC_SUBJECTS,
   SISTEC_TIMETABLE_SLOTS,
+  SISTEC_TIME_SLOTS,
+  PYTHON_TRAINING_SUBJECT,
+  PYTHON_TRAINING_DATES,
 } from "../data/sistec-timetable";
 import {
   isTeachingDay,
@@ -147,6 +151,10 @@ export interface SubjectItem {
   iconKey?: string;
   reviewNeeded?: boolean;
   notes?: string;
+  isSpecialTraining?: boolean;
+  totalScheduledSessions?: number;
+  trainingStartDate?: string;
+  trainingEndDate?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -182,7 +190,7 @@ export interface ClassSessionItem {
   scheduledEndAt: string; // ISO
   category: "Theory" | "Practical";
   room?: string | null;
-  personalStatus: "upcoming" | "present" | "absent" | "cancelled" | "frozen";
+  personalStatus: "upcoming" | "present" | "absent" | "cancelled" | "frozen" | "unmarked";
   erpStatus: "Present" | "Absent" | null;
   note?: string | null;
   absentType?: "manual_student" | "automatic_overdue" | null;
@@ -196,6 +204,10 @@ export interface ClassSessionItem {
   evidenceAvailable?: boolean;
   evidenceStoragePath?: string | null;
   academicDayNumber?: number | null;
+  isSpecialTraining?: boolean;
+  trainingProgram?: string;
+  previousPersonalStatus?: string | null;
+  previousErpStatus?: string | null;
   createdAt: string;
 }
 
@@ -358,15 +370,159 @@ export async function syncTimetableSlotTimings(uid: string): Promise<void> {
   }
 }
 
+// Ensure Python Training subject and its 66 distinct historical class sessions are seeded
+export async function ensurePythonTrainingLoaded(uid: string): Promise<{
+  subjectCreated: boolean;
+  sessionsCreated: number;
+  totalSessions: number;
+}> {
+  const subjectRef = doc(db, "users", uid, "subjects", PYTHON_TRAINING_SUBJECT.id);
+  let subjectCreated = false;
+
+  try {
+    const subjectSnap = await getDoc(subjectRef);
+    if (!subjectSnap.exists()) {
+      await setDoc(subjectRef, {
+        id: PYTHON_TRAINING_SUBJECT.id,
+        studentId: uid,
+        code: PYTHON_TRAINING_SUBJECT.code,
+        name: PYTHON_TRAINING_SUBJECT.name,
+        category: PYTHON_TRAINING_SUBJECT.category,
+        teacherName: "Training Faculty",
+        iconKey: PYTHON_TRAINING_SUBJECT.iconKey,
+        reviewNeeded: false,
+        notes: PYTHON_TRAINING_SUBJECT.notes,
+        totalScheduledSessions: 66,
+        trainingStartDate: "2026-09-07",
+        trainingEndDate: "2026-09-21",
+        isSpecialTraining: true,
+        createdAt: "2026-09-07T00:00:00.000Z",
+        updatedAt: new Date().toISOString(),
+      });
+      subjectCreated = true;
+    }
+
+    const sessionsRef = collection(db, "users", uid, "classSessions");
+    const q = query(sessionsRef, where("subjectId", "==", PYTHON_TRAINING_SUBJECT.id));
+    const existingSnap = await getDocs(q);
+    const existingMap = new Map<string, ClassSessionItem>();
+    existingSnap.forEach((d) => {
+      existingMap.set(d.id, d.data() as ClassSessionItem);
+    });
+
+    const batch = writeBatch(db);
+    let sessionsCreated = 0;
+    const nowIso = new Date().toISOString();
+
+    // 1. Build set of valid session IDs for the 66 confirmed training sessions
+    const validTrainingIds = new Set<string>();
+    for (const dateKey of PYTHON_TRAINING_DATES) {
+      for (const slot of SISTEC_TIME_SLOTS) {
+        validTrainingIds.add(`session-python-training-${dateKey}-${slot.slot}`);
+      }
+    }
+
+    // 2. Purge any stale/invalid training sessions not in validTrainingIds, and reset existing ones to unmarked
+    let resetCount = 0;
+    let purgedCount = 0;
+    existingSnap.forEach((d) => {
+      if (!validTrainingIds.has(d.id)) {
+        batch.delete(d.ref);
+        purgedCount++;
+      } else {
+        const data = d.data() as ClassSessionItem;
+        if (
+          data.personalStatus !== "unmarked" ||
+          data.finalized ||
+          data.erpStatus !== null ||
+          data.serverReceiptAt !== null
+        ) {
+          batch.update(d.ref, {
+            personalStatus: "unmarked",
+            finalized: false,
+            finalizedAt: null,
+            erpStatus: null,
+            serverReceiptAt: null,
+            clientCaptureAt: null,
+            evidenceAvailable: false,
+          });
+          resetCount++;
+        }
+      }
+    });
+
+    // 3. Create missing training sessions up to exactly 66
+    let academicDay = 1;
+    for (const dateKey of PYTHON_TRAINING_DATES) {
+      for (const slot of SISTEC_TIME_SLOTS) {
+        const sessionId = `session-python-training-${dateKey}-${slot.slot}`;
+        const existing = existingMap.get(sessionId);
+
+        if (!existing) {
+          const sessionDocRef = doc(db, "users", uid, "classSessions", sessionId);
+          const startAt = makeIstDateTime(dateKey, slot.start);
+          const endAt = makeIstDateTime(dateKey, slot.end);
+
+          const newSession: ClassSessionItem = {
+            id: sessionId,
+            studentId: uid,
+            subjectId: PYTHON_TRAINING_SUBJECT.id,
+            subjectName: PYTHON_TRAINING_SUBJECT.name,
+            subjectCode: PYTHON_TRAINING_SUBJECT.code,
+            timetableEntryId: null,
+            slot: slot.slot,
+            scheduledDate: dateKey,
+            scheduledStartAt: startAt.toISOString(),
+            scheduledEndAt: endAt.toISOString(),
+            category: PYTHON_TRAINING_SUBJECT.category,
+            room: "CS Lab / Online",
+            personalStatus: "unmarked",
+            erpStatus: null,
+            note: null,
+            canMarkPresent: true,
+            finalized: false,
+            finalizedAt: null,
+            serverReceiptAt: null,
+            clientCaptureAt: null,
+            cancelledAt: null,
+            evidenceAvailable: false,
+            academicDayNumber: academicDay,
+            isSpecialTraining: true,
+            trainingProgram: "Python Training",
+            createdAt: nowIso,
+          };
+
+          batch.set(sessionDocRef, newSession);
+          sessionsCreated++;
+        }
+      }
+      academicDay++;
+    }
+
+    if (sessionsCreated > 0 || resetCount > 0 || purgedCount > 0) {
+      await batch.commit();
+    }
+
+    return {
+      subjectCreated,
+      sessionsCreated,
+      totalSessions: existingMap.size + sessionsCreated,
+    };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `users/${uid}/subjects/${PYTHON_TRAINING_SUBJECT.id}`);
+  }
+}
+
 // Load authentic SISTec timetable and subjects if not yet seeded for this user
 export async function ensureSistecTimetableLoaded(uid: string): Promise<void> {
   const subjectsRef = collection(db, "users", uid, "subjects");
   try {
     const snap = await getDocs(subjectsRef);
     if (!snap.empty) {
-      // Already initialized: ensure P4 timings (12:35-1:35) and weekly sessions are synced
+      // Already initialized: ensure P4 timings, weekly sessions, and Python training are synced
       await syncTimetableSlotTimings(uid);
       await generateWeeklySessions(uid);
+      await ensurePythonTrainingLoaded(uid);
       return;
     }
 
@@ -422,6 +578,9 @@ export async function ensureSistecTimetableLoaded(uid: string): Promise<void> {
 
     // 3. Generate initial upcoming class sessions for today and the rest of current week
     await generateWeeklySessions(uid);
+
+    // 4. Ensure historical Python Training (66 sessions) is seeded
+    await ensurePythonTrainingLoaded(uid);
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `users/${uid}/subjects`);
   }
@@ -523,6 +682,66 @@ export function buildDefaultSistecData(uid: string): {
     }
   }
 
+  // Add Python Training special subject
+  const pythonSubjectItem: SubjectItem = {
+    id: PYTHON_TRAINING_SUBJECT.id,
+    studentId: uid,
+    code: PYTHON_TRAINING_SUBJECT.code,
+    name: PYTHON_TRAINING_SUBJECT.name,
+    category: PYTHON_TRAINING_SUBJECT.category,
+    teacherName: "Training Faculty",
+    iconKey: PYTHON_TRAINING_SUBJECT.iconKey,
+    reviewNeeded: false,
+    notes: PYTHON_TRAINING_SUBJECT.notes,
+    totalScheduledSessions: 66,
+    trainingStartDate: "2026-09-07",
+    trainingEndDate: "2026-09-21",
+    isSpecialTraining: true,
+    createdAt: "2026-09-07T00:00:00.000Z",
+    updatedAt: new Date().toISOString(),
+  };
+  subjects.push(pythonSubjectItem);
+
+  // Add exactly 66 historical Python Training class sessions (11 days * 6 periods)
+  let pyDayNum = 1;
+  for (const dateKey of PYTHON_TRAINING_DATES) {
+    for (const slot of SISTEC_TIME_SLOTS) {
+      const sessionId = `session-python-training-${dateKey}-${slot.slot}`;
+      const startAt = makeIstDateTime(dateKey, slot.start);
+      const endAt = makeIstDateTime(dateKey, slot.end);
+
+      sessions.push({
+        id: sessionId,
+        studentId: uid,
+        subjectId: PYTHON_TRAINING_SUBJECT.id,
+        subjectName: PYTHON_TRAINING_SUBJECT.name,
+        subjectCode: PYTHON_TRAINING_SUBJECT.code,
+        timetableEntryId: null,
+        slot: slot.slot,
+        scheduledDate: dateKey,
+        scheduledStartAt: startAt.toISOString(),
+        scheduledEndAt: endAt.toISOString(),
+        category: PYTHON_TRAINING_SUBJECT.category,
+        room: "CS Lab / Online",
+        personalStatus: "unmarked",
+        erpStatus: null,
+        note: null,
+        canMarkPresent: true,
+        finalized: false,
+        finalizedAt: null,
+        serverReceiptAt: null,
+        clientCaptureAt: null,
+        cancelledAt: null,
+        evidenceAvailable: false,
+        academicDayNumber: pyDayNum,
+        isSpecialTraining: true,
+        trainingProgram: "Python Training",
+        createdAt: "2026-09-07T00:00:00.000Z",
+      });
+    }
+    pyDayNum++;
+  }
+
   return { subjects, timetable, sessions };
 }
 
@@ -538,13 +757,18 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
     const entries: TimetableItem[] = [];
     timetableSnap.forEach((d) => entries.push(d.data() as TimetableItem));
 
-    // 1. Purge any accidental sessions that fall on official holidays or non-teaching days
+    // 1. Purge any accidental sessions that fall on official holidays or non-teaching days,
+    // while strictly PROTECTING all Python Training historical sessions!
     const existingSessionsSnap = await getDocs(sessionsRef);
     const existingDateIds = new Set<string>();
 
     for (const sDoc of existingSessionsSnap.docs) {
       const sData = sDoc.data() as ClassSessionItem;
       existingDateIds.add(sDoc.id);
+
+      if (sData.subjectId === PYTHON_TRAINING_SUBJECT.id || (sData as any).isSpecialTraining) {
+        continue; // Never delete Python Training sessions
+      }
 
       if (!isTeachingDay(sData.scheduledDate)) {
         try {
@@ -644,33 +868,40 @@ export async function markSessionPresent(
   }
 
   const session = sessionSnap.data() as ClassSessionItem;
-  if (session.personalStatus === "present" || (session.finalized && session.personalStatus !== "upcoming")) {
+  if (session.personalStatus === "present" || session.personalStatus === "frozen") {
+    throw new Error("Attendance for this class session has already been recorded and is uneditable.");
+  }
+  if (session.finalized && session.personalStatus !== "upcoming" && session.personalStatus !== "unmarked") {
     throw new Error("Attendance for this class session has already been recorded and is uneditable.");
   }
 
-  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
-  if (session.scheduledDate !== today) {
-    throw new Error("Attendance can only be marked for today's scheduled classes.");
-  }
+  const isHistoricalTraining = session.subjectId === PYTHON_TRAINING_SUBJECT.id || (session as any).isSpecialTraining;
 
-  const now = Date.now();
-  const startMs = new Date(session.scheduledStartAt).getTime();
-  const endMs = new Date(session.scheduledEndAt).getTime();
+  if (!isHistoricalTraining) {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+    if (session.scheduledDate !== today) {
+      throw new Error("Attendance can only be marked for today's scheduled classes.");
+    }
 
-  // Strict interval check: scheduledStart <= trustedServerTime < scheduledEnd
-  if (now < startMs) {
-    const diffMins = Math.ceil((startMs - now) / 60000);
-    throw new Error(`Attendance window has not opened yet. Class begins in ${diffMins} minute(s).`);
-  }
+    const now = Date.now();
+    const startMs = new Date(session.scheduledStartAt).getTime();
+    const endMs = new Date(session.scheduledEndAt).getTime();
 
-  if (now >= endMs) {
-    // Automatically finalize as absent
-    await updateDoc(sessionRef, {
-      personalStatus: "absent",
-      finalized: true,
-      finalizedAt: new Date(endMs).toISOString(),
-    });
-    throw new Error("Attendance window closed at scheduled end time. The session has been recorded as Absent.");
+    // Strict interval check: scheduledStart <= trustedServerTime < scheduledEnd
+    if (now < startMs) {
+      const diffMins = Math.ceil((startMs - now) / 60000);
+      throw new Error(`Attendance window has not opened yet. Class begins in ${diffMins} minute(s).`);
+    }
+
+    if (now >= endMs) {
+      // Automatically finalize as absent
+      await updateDoc(sessionRef, {
+        personalStatus: "absent",
+        finalized: true,
+        finalizedAt: new Date(endMs).toISOString(),
+      });
+      throw new Error("Attendance window closed at scheduled end time. The session has been recorded as Absent.");
+    }
   }
 
   // Upload private evidence photo to Firebase Storage if captured
@@ -712,9 +943,11 @@ export async function markSessionPresent(
   await setDoc(eventRef, {
     id: `event-${sessionId}-${Date.now()}`,
     sessionId,
-    eventType: "present_marked",
+    eventType: isHistoricalTraining ? "training_present_marked" : "present_marked",
     serverTimestamp: receiptAt,
-    message: evidenceStoragePath
+    message: isHistoricalTraining
+      ? "Python Training attendance marked Present by student."
+      : evidenceStoragePath
       ? "Attendance marked Present with photo evidence."
       : "Attendance marked Present with server receipt time.",
   });
@@ -735,13 +968,17 @@ export async function markSessionAbsent(
   }
 
   const session = sessionSnap.data() as ClassSessionItem;
-  if (session.personalStatus === "present" || session.personalStatus === "absent" || session.finalized) {
+  if (session.personalStatus === "present" || session.personalStatus === "absent" || session.personalStatus === "frozen") {
     throw new Error("Attendance for this class session is already recorded and is uneditable.");
   }
 
-  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
-  if (session.scheduledDate !== today) {
-    throw new Error("Attendance can only be marked for today's scheduled classes.");
+  const isHistoricalTraining = session.subjectId === PYTHON_TRAINING_SUBJECT.id || (session as any).isSpecialTraining;
+
+  if (!isHistoricalTraining) {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+    if (session.scheduledDate !== today) {
+      throw new Error("Attendance can only be marked for today's scheduled classes.");
+    }
   }
 
   const nowIso = new Date().toISOString();
@@ -756,9 +993,11 @@ export async function markSessionAbsent(
   await setDoc(eventRef, {
     id: `event-absent-${sessionId}-${Date.now()}`,
     sessionId,
-    eventType: "absent_marked_student",
+    eventType: isHistoricalTraining ? "training_absent_marked" : "absent_marked_student",
     serverTimestamp: nowIso,
-    message: "Attendance marked Absent by student (Uneditable).",
+    message: isHistoricalTraining
+      ? "Python Training attendance marked Absent by student (Uneditable)."
+      : "Attendance marked Absent by student (Uneditable).",
   });
 
   return { success: true, message: "Attendance marked Absent by student (Uneditable)." };

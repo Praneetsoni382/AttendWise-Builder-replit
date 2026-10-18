@@ -141,6 +141,51 @@ export const SISTEC_SUBJECTS: SistecSubjectSeed[] = [
   },
 ];
 
+// Python Training Special Program: 7 September 2026 through 21 September 2026
+// Exactly 66 confirmed historical class sessions across 11 training days (6 periods/day)
+// Exceptions: Sept 14 (Ganesh Chaturthi - excluded), Sept 19 (Included 6 periods)
+export interface PythonTrainingSubjectSeed extends SistecSubjectSeed {
+  totalScheduledSessions: number;
+  trainingStartDate: string;
+  trainingEndDate: string;
+  periodsPerDay: number;
+  isSpecialTraining: boolean;
+}
+
+export const PYTHON_TRAINING_SUBJECT: PythonTrainingSubjectSeed = {
+  id: "sub-python-training",
+  code: "PYTHON-TRG",
+  name: "Python Training",
+  category: "Practical",
+  iconKey: "terminal",
+  totalScheduledSessions: 66,
+  trainingStartDate: "2026-09-07",
+  trainingEndDate: "2026-09-21",
+  periodsPerDay: 6,
+  isSpecialTraining: true,
+  notes: "Special Python Training Program (7–21 Sept 2026). Exactly 66 confirmed historical class sessions.",
+};
+
+// 11 confirmed training days * 6 slots = 66 distinct class sessions
+export const PYTHON_TRAINING_DATES: readonly string[] = [
+  "2026-09-07", // Day 1 (Mon)
+  "2026-09-08", // Day 2 (Tue)
+  "2026-09-09", // Day 3 (Wed)
+  "2026-09-10", // Day 4 (Thu)
+  "2026-09-11", // Day 5 (Fri)
+  "2026-09-12", // Day 6 (Sat)
+  // 2026-09-13: Sunday (Off)
+  // 2026-09-14: Ganesh Chaturthi (Holiday / Excluded per requirements)
+  "2026-09-15", // Day 7 (Tue)
+  "2026-09-16", // Day 8 (Wed)
+  "2026-09-17", // Day 9 (Thu)
+  "2026-09-18", // Day 10 (Fri)
+  "2026-09-19", // Day 11 (Sat) - included per requirements (6 periods took place)
+  // 2026-09-20: Sunday (Off)
+  // 2026-09-21: College classes start
+];
+
+
 // Full Monday-Saturday schedule matching the exact college timetable PDF with corrected P4 timings
 export const SISTEC_TIMETABLE_SLOTS: SistecSlotSeed[] = [
   // MONDAY (Day 1)

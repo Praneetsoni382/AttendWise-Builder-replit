@@ -119,49 +119,59 @@ export interface FullAnalyticsSummary {
  * Checks whether a class session is eligible for attendance calculations.
  *
  * A class is ELIGIBLE for the attendance denominator when:
- * 1. It is scheduled on an official teaching day (not a holiday/Sunday).
- * 2. It is not frozen (personalStatus !== "frozen").
- * 3. It is not cancelled (personalStatus !== "cancelled").
- * 4. AND EITHER:
- *    a) Attendance has already been recorded as Present (personalStatus === "present").
- *    b) Attendance was marked Absent and finalized (personalStatus === "absent" && finalized).
- *    c) Its scheduled end time has elapsed according to trusted server time (nowMs >= scheduledEndAt).
+ * 1. For Python Training (fixed historical program completed 7-19 Sept 2026):
+ *    All 66 confirmed historical sessions are eligible unless frozen or cancelled.
+ * 2. For regular college subjects:
+ *    a) It is scheduled on an official teaching day (not a holiday/Sunday).
+ *    b) It is not frozen (personalStatus !== "frozen").
+ *    c) It is not cancelled (personalStatus !== "cancelled").
+ *    d) AND EITHER:
+ *       - Attendance has already been recorded as Present (personalStatus === "present").
+ *       - Attendance was marked Absent and finalized after scheduled end time has elapsed (nowMs >= scheduledEndAt).
  *
  * Future or in-progress classes that have not yet been marked present are excluded.
  */
 export function isSessionEligible(session: SessionLike, nowMs: number = Date.now()): boolean {
-  // 1. Must be on an official teaching day
+  // 1. Python Training historical sessions are permanently capped at 66 completed sessions
+  if (session.subjectId === "sub-python-training" || (session as any).isSpecialTraining) {
+    if (session.personalStatus === "frozen" || session.personalStatus === "cancelled") {
+      return false;
+    }
+    return true;
+  }
+
+  // 2. Must be on an official teaching day
   if (!isTeachingDay(session.scheduledDate)) {
     return false;
   }
 
-  // 2. Frozen classes are strictly excluded from calculations & denominators
+  // 3. Frozen classes are strictly excluded from calculations & denominators
   if (session.personalStatus === "frozen") {
     return false;
   }
 
-  // 3. Cancelled classes are strictly excluded
+  // 4. Cancelled classes are strictly excluded
   if (session.personalStatus === "cancelled") {
     return false;
   }
 
-  // 4. If attendance has already been recorded as Present, it is an authoritative completed attendance record!
+  // 5. Check scheduled interval boundary
+  const endMs = new Date(session.scheduledEndAt).getTime();
+  if (!isNaN(endMs) && nowMs < endMs) {
+    // Before scheduledEndAt, only an authoritative Present check-in is eligible
+    return session.personalStatus === "present";
+  }
+
+  // 6. After scheduledEndAt has elapsed:
   if (session.personalStatus === "present") {
     return true;
   }
 
-  // 5. If manually recorded Absent by student and finalized, it is an eligible completed record
   if (session.personalStatus === "absent" && session.finalized) {
     return true;
   }
 
-  // 6. Time boundary check: If scheduled end time has passed, class is resolved/overdue
-  const endMs = new Date(session.scheduledEndAt).getTime();
-  if (!isNaN(endMs) && nowMs >= endMs) {
-    return true;
-  }
-
-  // Future or in-progress classes that have not been marked are excluded
+  // Future or unresolved classes without final status are excluded
   return false;
 }
 
@@ -169,10 +179,11 @@ export function isSessionEligible(session: SessionLike, nowMs: number = Date.now
  * Calculates AttendWise metric for a list of eligible sessions.
  * Formula: AttendWise Present ÷ Total eligible completed unfrozen classes × 100
  * Denominator is zero -> returns null (displayed as N/A).
+ * Unmarked sessions contribute to totalEligible denominator, but 0 to presentCount and 0 to absentCount.
  */
 export function calculateAttendwiseMetric(eligibleList: SessionLike[]): MetricResult {
   const presentCount = eligibleList.filter((s) => s.personalStatus === "present").length;
-  const absentCount = eligibleList.filter((s) => s.personalStatus !== "present").length;
+  const absentCount = eligibleList.filter((s) => s.personalStatus === "absent").length;
   const totalEligible = eligibleList.length;
 
   const percentage =
@@ -357,7 +368,7 @@ export function computeFullAnalytics(
   let discrepancyCount = 0;
 
   for (const s of eligible) {
-    if (s.erpStatus === "Present" || s.erpStatus === "Absent") {
+    if ((s.erpStatus === "Present" || s.erpStatus === "Absent") && (s.personalStatus === "present" || s.personalStatus === "absent")) {
       const personalAsErp = s.personalStatus === "present" ? "Present" : "Absent";
       if (s.erpStatus === personalAsErp) {
         matchingCount++;

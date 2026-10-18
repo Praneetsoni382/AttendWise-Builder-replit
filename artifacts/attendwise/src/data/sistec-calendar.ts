@@ -304,6 +304,23 @@ export function getCalendarDayInfo(dateKey: string): CalendarDayInfo {
     };
   }
 
+  // 2.5 Check for Python Training working dates (Sept 7 to Sept 19, excluding Sept 14 Ganesh Chaturthi and Sept 13 Sunday)
+  if (
+    dateKey >= "2026-09-07" &&
+    dateKey <= "2026-09-19" &&
+    dateKey !== "2026-09-14" &&
+    dateKey !== "2026-09-13"
+  ) {
+    return {
+      date: dateKey,
+      dayOfWeek,
+      type: "training",
+      title: dateKey === "2026-09-19" ? "Python Training (Saturday Working)" : "Python Training Day",
+      description: "Confirmed working training day - 6 periods took place",
+      isWorkingDay: true,
+    };
+  }
+
   // 2. Check for Sunday
   if (dayOfWeek === 7) {
     return {

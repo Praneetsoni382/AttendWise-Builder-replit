@@ -29,6 +29,10 @@
         "teacherName": { "type": "string" },
         "iconKey": { "type": "string" },
         "reviewNeeded": { "type": "boolean" },
+        "isSpecialTraining": { "type": "boolean" },
+        "totalScheduledSessions": { "type": "number" },
+        "trainingStartDate": { "type": "string" },
+        "trainingEndDate": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -75,7 +79,7 @@
         "scheduledEndAt": { "type": "string", "format": "date-time" },
         "category": { "type": "string", "enum": ["Theory", "Practical"] },
         "room": { "type": "string" },
-        "personalStatus": { "type": "string", "enum": ["upcoming", "present", "absent", "cancelled"] },
+        "personalStatus": { "type": "string", "enum": ["upcoming", "present", "absent", "cancelled", "frozen", "unmarked"] },
         "erpStatus": { "type": "string", "enum": ["Present", "Absent"] },
         "canMarkPresent": { "type": "boolean" },
         "finalized": { "type": "boolean" },
@@ -85,6 +89,8 @@
         "cancelledAt": { "type": "string", "format": "date-time" },
         "evidenceAvailable": { "type": "boolean" },
         "evidenceStoragePath": { "type": "string" },
+        "isSpecialTraining": { "type": "boolean" },
+        "trainingProgram": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "studentId", "subjectId", "scheduledDate", "scheduledStartAt", "scheduledEndAt", "category", "personalStatus", "finalized"]
