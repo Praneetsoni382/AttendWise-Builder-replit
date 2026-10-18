@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import AcademicCalendarView from "./pages/academic-calendar";
 import AnalyticsPage from "./pages/analytics";
+import { LandingPage } from "./components/LandingPage";
 import {
   getCalendarDayInfo,
   SISTEC_OFFICIAL_HOLIDAYS,
@@ -4582,7 +4583,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <AuthWelcome onAuthSuccess={() => setLocation("/dashboard")} />;
+    return <LandingPage onAuthSuccess={() => setLocation("/dashboard")} />;
   }
 
   return (
