@@ -80,7 +80,7 @@ import {
   type AttendanceEventItem,
 } from "./lib/firebase";
 import { computeFullAnalytics } from "./lib/analytics-calculator";
-import { useCamera as useCameraHook } from "./hooks/useCamera";
+import { useCamera } from "./hooks/useCamera";
 import {
   registerStudent,
   loginStudent,
@@ -940,7 +940,7 @@ function AttendanceCardDialog({
     stopCamera, 
     cameraError, 
     isLoading: cameraLoading 
-  } = useCameraHook({ idealFacingMode: "user" });
+  } = useCamera({ idealFacingMode: "user" });
 
   useEffect(() => {
     if (!open || !session || !user || !session.evidenceAvailable || !auth.currentUser) {
