@@ -403,18 +403,43 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
     }
 
     const sessionsRef = collection(db, "users", uid, "classSessions");
-    const q = query(sessionsRef, where("subjectId", "==", PYTHON_TRAINING_SUBJECT.id));
-    const existingSnap = await getDocs(q);
+    const q = query(sessionsRef); // Fetch ALL sessions to clean up stale ones
+    const allSessionsSnap = await getDocs(q);
     const existingMap = new Map<string, ClassSessionItem>();
-    existingSnap.forEach((d) => {
-      existingMap.set(d.id, d.data() as ClassSessionItem);
-    });
+    
+    // Use multiple batches to avoid 500 operation limit
+    let batch = writeBatch(db);
+    let opCount = 0;
 
-    const batch = writeBatch(db);
-    let sessionsCreated = 0;
-    const nowIso = new Date().toISOString();
+    const commitBatch = async () => {
+      if (opCount > 0) {
+        await batch.commit();
+        batch = writeBatch(db);
+        opCount = 0;
+      }
+    };
 
-    // 1. Build set of valid session IDs for the 66 confirmed training sessions
+    for (const d of allSessionsSnap.docs) {
+      const item = d.data() as ClassSessionItem;
+      existingMap.set(d.id, item);
+
+      // 1. Purge stale non-training sessions before 2026-09-21
+      if (item.scheduledDate < "2026-09-21" && !item.isSpecialTraining) {
+        batch.delete(d.ref);
+        opCount++;
+        if (opCount >= 450) await commitBatch();
+      }
+      // 2. Reset Python Training status
+      else if (item.subjectId === PYTHON_TRAINING_SUBJECT.id) {
+        if (item.personalStatus !== "unmarked" || item.erpStatus !== null) {
+          batch.update(d.ref, { personalStatus: "unmarked", erpStatus: null });
+          opCount++;
+          if (opCount >= 450) await commitBatch();
+        }
+      }
+    }
+
+    // 3. Purge training sessions not in validTrainingIds
     const validTrainingIds = new Set<string>();
     for (const dateKey of PYTHON_TRAINING_DATES) {
       for (const slot of SISTEC_TIME_SLOTS) {
@@ -422,28 +447,27 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
       }
     }
 
-    // 2. Purge any stale/invalid training sessions not in validTrainingIds, and keep existing sessions intact (preserving user attendance permanently)
-    let purgedCount = 0;
-    existingSnap.forEach((d) => {
-      if (!validTrainingIds.has(d.id)) {
+    for (const d of allSessionsSnap.docs) {
+      const item = d.data() as ClassSessionItem;
+      if (item.subjectId === PYTHON_TRAINING_SUBJECT.id && !validTrainingIds.has(item.id)) {
         batch.delete(d.ref);
-        purgedCount++;
+        opCount++;
+        if (opCount >= 450) await commitBatch();
       }
-    });
+    }
 
-    // 3. Create missing training sessions up to exactly 66
+    // 4. Create missing training sessions
     let academicDay = 1;
+    let sessionsCreated = 0;
     for (const dateKey of PYTHON_TRAINING_DATES) {
       for (const slot of SISTEC_TIME_SLOTS) {
         const sessionId = `session-python-training-${dateKey}-${slot.slot}`;
-        const existing = existingMap.get(sessionId);
-
-        if (!existing) {
+        if (!existingMap.has(sessionId)) {
           const sessionDocRef = doc(db, "users", uid, "classSessions", sessionId);
           const startAt = makeIstDateTime(dateKey, slot.start);
           const endAt = makeIstDateTime(dateKey, slot.end);
 
-          const newSession: ClassSessionItem = {
+          batch.set(sessionDocRef, {
             id: sessionId,
             studentId: uid,
             subjectId: PYTHON_TRAINING_SUBJECT.id,
@@ -470,18 +494,19 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
             isSpecialTraining: true,
             trainingProgram: "Python Training",
             createdAt: nowIso,
-          };
-
-          batch.set(sessionDocRef, newSession);
+          });
           sessionsCreated++;
+          opCount++;
+          if (opCount >= 450) await commitBatch();
         }
       }
       academicDay++;
     }
+    await commitBatch();
 
-    if (sessionsCreated > 0 || purgedCount > 0) {
-      await batch.commit();
-    }
+
+    // cleanup complete
+
 
     return {
       subjectCreated,

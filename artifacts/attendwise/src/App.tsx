@@ -558,7 +558,7 @@ function Shell({
 }
 
 // Authentication & Welcome Screen
-function AuthWelcome({ onAuthSuccess }: { onAuthSuccess: () => void }) {
+function AuthWelcome({ onAuthSuccess }: { onAuthSuccess: (user?: any) => void }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -576,14 +576,17 @@ function AuthWelcome({ onAuthSuccess }: { onAuthSuccess: () => void }) {
     setInfoMsg("");
     setPending(true);
     try {
+      let loggedUser = null;
       if (mode === "signup") {
         const res = await registerStudent(email, password, name);
         if (res.message) setInfoMsg(res.message);
+        loggedUser = res.user;
       } else {
         const res = await loginStudent(email, password);
         if (res.message) setInfoMsg(res.message);
+        loggedUser = res.user;
       }
-      onAuthSuccess();
+      onAuthSuccess(loggedUser || auth.currentUser);
     } catch (err: any) {
       setError(err?.message || "Authentication failed. Check your credentials.");
     } finally {
@@ -4344,7 +4347,7 @@ function ProfileView({
 
 // Router and Main Application
 export default function App() {
-  const [user, setUser] = useState<AppStudentUser | FirebaseUser | null>(() => getStoredActiveSession());
+  const [user, setUser] = useState<AppStudentUser | FirebaseUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
@@ -4355,19 +4358,9 @@ export default function App() {
   // Listen to Firebase Auth state
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
-      if (currentUser) {
-        setUser(currentUser);
-        setAuthLoading(false);
-        try {
-          await ensureSistecTimetableLoaded(currentUser.uid);
-        } catch (err) {
-          console.error("Failed to load initial SISTec timetable:", err);
-        }
-      } else {
-        const local = getStoredActiveSession();
-        setUser(local);
-        setAuthLoading(false);
-      }
+      // Do not auto-login on initial visit; require sign in from landing page
+      setUser(null);
+      setAuthLoading(false);
     });
 
     return () => unsubscribe();
@@ -4583,7 +4576,13 @@ export default function App() {
   }
 
   if (!user) {
-    return <LandingPage onAuthSuccess={() => setLocation("/dashboard")} />;
+    return <LandingPage onAuthSuccess={(loggedInUser) => {
+      const active = loggedInUser || auth.currentUser || getStoredActiveSession();
+      if (active) {
+        setUser(active);
+        setLocation("/dashboard");
+      }
+    }} />;
   }
 
   return (
