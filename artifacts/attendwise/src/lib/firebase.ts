@@ -422,32 +422,12 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
       }
     }
 
-    // 2. Purge any stale/invalid training sessions not in validTrainingIds, and reset existing ones to unmarked
-    let resetCount = 0;
+    // 2. Purge any stale/invalid training sessions not in validTrainingIds, and keep existing sessions intact (preserving user attendance permanently)
     let purgedCount = 0;
     existingSnap.forEach((d) => {
       if (!validTrainingIds.has(d.id)) {
         batch.delete(d.ref);
         purgedCount++;
-      } else {
-        const data = d.data() as ClassSessionItem;
-        if (
-          data.personalStatus !== "unmarked" ||
-          data.finalized ||
-          data.erpStatus !== null ||
-          data.serverReceiptAt !== null
-        ) {
-          batch.update(d.ref, {
-            personalStatus: "unmarked",
-            finalized: false,
-            finalizedAt: null,
-            erpStatus: null,
-            serverReceiptAt: null,
-            clientCaptureAt: null,
-            evidenceAvailable: false,
-          });
-          resetCount++;
-        }
       }
     });
 
@@ -499,7 +479,7 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
       academicDay++;
     }
 
-    if (sessionsCreated > 0 || resetCount > 0 || purgedCount > 0) {
+    if (sessionsCreated > 0 || purgedCount > 0) {
       await batch.commit();
     }
 
