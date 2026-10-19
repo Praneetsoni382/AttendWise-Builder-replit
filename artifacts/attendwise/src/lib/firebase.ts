@@ -378,6 +378,7 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
 }> {
   const subjectRef = doc(db, "users", uid, "subjects", PYTHON_TRAINING_SUBJECT.id);
   let subjectCreated = false;
+  const nowIso = new Date().toISOString();
 
   try {
     const subjectSnap = await getDoc(subjectRef);
@@ -397,7 +398,7 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
         trainingEndDate: "2026-09-21",
         isSpecialTraining: true,
         createdAt: "2026-09-07T00:00:00.000Z",
-        updatedAt: new Date().toISOString(),
+        updatedAt: nowIso,
       });
       subjectCreated = true;
     }
@@ -424,18 +425,10 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
       existingMap.set(d.id, item);
 
       // 1. Purge stale non-training sessions before 2026-09-21
-      if (item.scheduledDate < "2026-09-21" && !item.isSpecialTraining) {
+      if (item.scheduledDate < "2026-09-21" && !item.isSpecialTraining && item.subjectId !== PYTHON_TRAINING_SUBJECT.id) {
         batch.delete(d.ref);
         opCount++;
-        if (opCount >= 450) await commitBatch();
-      }
-      // 2. Reset Python Training status
-      else if (item.subjectId === PYTHON_TRAINING_SUBJECT.id) {
-        if (item.personalStatus !== "unmarked" || item.erpStatus !== null) {
-          batch.update(d.ref, { personalStatus: "unmarked", erpStatus: null });
-          opCount++;
-          if (opCount >= 450) await commitBatch();
-        }
+        if (opCount >= 400) await commitBatch();
       }
     }
 
@@ -452,7 +445,7 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
       if (item.subjectId === PYTHON_TRAINING_SUBJECT.id && !validTrainingIds.has(item.id)) {
         batch.delete(d.ref);
         opCount++;
-        if (opCount >= 450) await commitBatch();
+        if (opCount >= 400) await commitBatch();
       }
     }
 
@@ -497,16 +490,12 @@ export async function ensurePythonTrainingLoaded(uid: string): Promise<{
           });
           sessionsCreated++;
           opCount++;
-          if (opCount >= 450) await commitBatch();
+          if (opCount >= 400) await commitBatch();
         }
       }
       academicDay++;
     }
     await commitBatch();
-
-
-    // cleanup complete
-
 
     return {
       subjectCreated,
@@ -786,8 +775,16 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
     }
 
     const now = new Date();
-    const batch = writeBatch(db);
-    let sessionCount = 0;
+    let batch = writeBatch(db);
+    let opCount = 0;
+
+    const commitBatch = async () => {
+      if (opCount > 0) {
+        await batch.commit();
+        batch = writeBatch(db);
+        opCount = 0;
+      }
+    };
 
     const teachingDateKeys = Object.keys(BTECH_3RD_TEACHING_DAYS);
 
@@ -836,13 +833,14 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
           academicDayNumber: academicDay,
           createdAt: now.toISOString(),
         });
-        sessionCount++;
+        opCount++;
+        if (opCount >= 400) {
+          await commitBatch();
+        }
       }
     }
 
-    if (sessionCount > 0) {
-      await batch.commit();
-    }
+    await commitBatch();
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `users/${uid}/classSessions`);
   }

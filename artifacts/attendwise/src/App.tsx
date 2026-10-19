@@ -58,6 +58,7 @@ import {
   resetStudentPassword,
   logOutStudent,
   ensureSistecTimetableLoaded,
+  ensurePythonTrainingLoaded,
   syncTimetableSlotTimings,
   buildDefaultSistecData,
   markSessionPresent,
@@ -89,7 +90,7 @@ import {
   getStoredActiveSession,
   type AppStudentUser,
 } from "./lib/auth-service";
-import { SISTEC_METADATA, SISTEC_TIME_SLOTS } from "./data/sistec-timetable";
+import { SISTEC_METADATA, SISTEC_TIME_SLOTS, PYTHON_TRAINING_SUBJECT } from "./data/sistec-timetable";
 import { Button } from "@workspace/attendwise-design-system/components/ui/button";
 import { Badge } from "@workspace/attendwise-design-system/components/ui/badge";
 import {
@@ -4376,7 +4377,50 @@ export default function App() {
       return;
     }
 
+    // 1. UNIVERSAL DEFAULT SEEDING:
+    // Build default authentic SISTec data immediately for this student (all 13 subjects, 36 timetable slots, and all 492 sessions)
+    // This guarantees that ANY user account (existing, newly created, or created in the future) starts with the exact same
+    // universal denominator of 192 (66 Python training sessions Sept 7–19 + 126 regular classes held so far) with 0 present (no pre-assumed present).
+    const defaultData = buildDefaultSistecData(user.uid);
+
+    // If local student session overrides exist in localStorage, restore them
+    const localStoreKey = `attendwise_student_sessions_${user.uid}`;
+    let initialSessions = defaultData.sessions;
+    try {
+      const stored = localStorage.getItem(localStoreKey);
+      if (stored) {
+        const parsed = JSON.parse(stored) as Record<string, Partial<ClassSessionItem>>;
+        initialSessions = defaultData.sessions.map((s) => {
+          if (parsed[s.id]) {
+            return { ...s, ...parsed[s.id] };
+          }
+          return s;
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to load student local session overrides:", e);
+    }
+
+    setSubjects(defaultData.subjects);
+    setTimetable(defaultData.timetable);
+    setSessions(initialSessions);
+    setProfile({
+      id: user.uid,
+      displayName: user.displayName || "Student",
+      email: user.email || "",
+      timezone: TIMEZONE,
+      attendanceTarget: 75,
+      institution: SISTEC_METADATA.institution,
+      course: SISTEC_METADATA.course,
+      createdAt: new Date().toISOString(),
+    });
+
     if (auth.currentUser) {
+      // Ensure Firestore has all SISTec subjects, timetable slots, and Python training seeded
+      ensureSistecTimetableLoaded(user.uid).catch((err) => {
+        console.warn("Firestore timetable sync background notice:", err);
+      });
+
       // 1. Profile listener
       const unsubProfile = onSnapshot(
         doc(db, "users", user.uid),
@@ -4394,9 +4438,16 @@ export default function App() {
       const unsubSubjects = onSnapshot(
         collection(db, "users", user.uid, "subjects"),
         (snap) => {
-          const list: SubjectItem[] = [];
-          snap.forEach((d) => list.push(d.data() as SubjectItem));
-          setSubjects(list);
+          if (!snap.empty) {
+            const list: SubjectItem[] = [];
+            snap.forEach((d) => list.push(d.data() as SubjectItem));
+            // Ensure Python Training subject is always present
+            if (!list.some((s) => s.id === PYTHON_TRAINING_SUBJECT.id)) {
+              const pySub = defaultData.subjects.find((s) => s.id === PYTHON_TRAINING_SUBJECT.id);
+              if (pySub) list.push(pySub);
+            }
+            setSubjects(list);
+          }
         },
         (error) => {
           handleFirestoreError(error, OperationType.GET, `users/${user.uid}/subjects`);
@@ -4407,9 +4458,11 @@ export default function App() {
       const unsubTimetable = onSnapshot(
         collection(db, "users", user.uid, "timetableEntries"),
         (snap) => {
-          const list: TimetableItem[] = [];
-          snap.forEach((d) => list.push(d.data() as TimetableItem));
-          setTimetable(list);
+          if (!snap.empty) {
+            const list: TimetableItem[] = [];
+            snap.forEach((d) => list.push(d.data() as TimetableItem));
+            setTimetable(list);
+          }
         },
         (error) => {
           handleFirestoreError(error, OperationType.GET, `users/${user.uid}/timetableEntries`);
@@ -4420,15 +4473,48 @@ export default function App() {
       const unsubSessions = onSnapshot(
         collection(db, "users", user.uid, "classSessions"),
         (snap) => {
-          const list: ClassSessionItem[] = [];
+          if (snap.empty) {
+            // Keep the default sessions and trigger background seeding
+            ensureSistecTimetableLoaded(user.uid).catch(console.warn);
+            return;
+          }
+
+          const firestoreMap = new Map<string, ClassSessionItem>();
           snap.forEach((d) => {
             const item = d.data() as ClassSessionItem;
             if (isTeachingDay(item.scheduledDate) || item.isSpecialTraining || item.subjectId === "sub-python-training") {
-              list.push(item);
+              firestoreMap.set(item.id, item);
             }
           });
-          setSessions(list);
-          void finalizeExpiredSessionsForStudent(user.uid, list);
+
+          // Merge: use Firestore record if present, otherwise default session (guarantees Python training is never omitted)
+          let missingTrainingCount = 0;
+          const mergedList: ClassSessionItem[] = defaultData.sessions.map((defaultSession) => {
+            const fsSession = firestoreMap.get(defaultSession.id);
+            if (fsSession) {
+              return fsSession;
+            }
+            if (defaultSession.subjectId === "sub-python-training") {
+              missingTrainingCount++;
+            }
+            return defaultSession;
+          });
+
+          // Also include any Firestore sessions not in defaultData
+          firestoreMap.forEach((fsSession, fsId) => {
+            if (!defaultData.sessions.some((ds) => ds.id === fsId)) {
+              mergedList.push(fsSession);
+            }
+          });
+
+          setSessions(mergedList);
+
+          // If any Python training sessions were missing in Firestore, seed them now
+          if (missingTrainingCount > 0) {
+            ensurePythonTrainingLoaded(user.uid).catch(console.warn);
+          }
+
+          void finalizeExpiredSessionsForStudent(user.uid, mergedList);
         },
         (error) => {
           handleFirestoreError(error, OperationType.GET, `users/${user.uid}/classSessions`);
@@ -4441,23 +4527,6 @@ export default function App() {
         unsubTimetable();
         unsubSessions();
       };
-    } else {
-      // Local student vault initialization (guarantees zero permission errors)
-      setProfile({
-        id: user.uid,
-        displayName: user.displayName || "Student",
-        email: user.email || "",
-        timezone: TIMEZONE,
-        attendanceTarget: 75,
-        institution: SISTEC_METADATA.institution,
-        course: SISTEC_METADATA.course,
-        createdAt: new Date().toISOString(),
-      });
-
-      const { subjects: s, timetable: t, sessions: sess } = buildDefaultSistecData(user.uid);
-      setSubjects(s);
-      setTimetable(t);
-      setSessions(sess);
     }
   }, [user]);
 
@@ -4471,12 +4540,27 @@ export default function App() {
     setLocation("/");
   };
 
+  // Helper to persist student session modifications to local storage for instant offline resilience
+  const persistLocalSessionOverride = (sessionId: string, patch: Partial<ClassSessionItem>) => {
+    if (!user) return;
+    try {
+      const key = `attendwise_student_sessions_${user.uid}`;
+      const existing = localStorage.getItem(key);
+      const parsed = existing ? JSON.parse(existing) : {};
+      parsed[sessionId] = { ...(parsed[sessionId] || {}), ...patch };
+      localStorage.setItem(key, JSON.stringify(parsed));
+    } catch (e) {
+      console.warn("Failed to persist local session override:", e);
+    }
+  };
+
   // Real-time optimistic action handlers for instant feedback on user actions:
   const handleRecordErp = async (sessionId: string, status: "Present" | "Absent") => {
     // 1. Instant optimistic update so analytics recompute with 0ms delay:
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, erpStatus: status } : s))
     );
+    persistLocalSessionOverride(sessionId, { erpStatus: status });
     // 2. Persist to Firestore:
     if (user && auth.currentUser) {
       await recordSessionErpStatus(user.uid, sessionId, status);
@@ -4499,6 +4583,12 @@ export default function App() {
           : s
       )
     );
+    persistLocalSessionOverride(sessionId, {
+      personalStatus: "present",
+      finalized: true,
+      finalizedAt: nowIso,
+      serverReceiptAt: nowIso,
+    });
     // 2. Persist to Firestore:
     if (user && auth.currentUser) {
       await markSessionPresent(user.uid, sessionId, photoUrl);
@@ -4519,6 +4609,11 @@ export default function App() {
           : s
       )
     );
+    persistLocalSessionOverride(sessionId, {
+      personalStatus: "absent",
+      finalized: true,
+      finalizedAt: nowIso,
+    });
     if (user && auth.currentUser) {
       await markSessionAbsent(user.uid, sessionId);
     }
@@ -4542,6 +4637,12 @@ export default function App() {
           : s
       )
     );
+    persistLocalSessionOverride(sessionId, {
+      personalStatus: "frozen",
+      finalized: true,
+      frozenAt: nowIso,
+      finalizedAt: nowIso,
+    });
     // 2. Persist to Firestore / IndexedDB cache
     if (user) {
       await freezeClassSession(user.uid, sessionId);
@@ -4562,6 +4663,11 @@ export default function App() {
         };
       })
     );
+    persistLocalSessionOverride(sessionId, {
+      personalStatus: "absent",
+      frozenAt: null,
+      finalized: true,
+    });
     if (user) {
       await unfreezeClassSession(user.uid, sessionId);
     }

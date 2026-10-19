@@ -5,7 +5,7 @@ import {
   updateProfile,
   type User as FirebaseUser,
 } from "firebase/auth";
-import { auth, db, initializeUserProfile, TIMEZONE } from "./firebase";
+import { auth, db, initializeUserProfile, ensureSistecTimetableLoaded, TIMEZONE } from "./firebase";
 import { SISTEC_METADATA } from "../data/sistec-timetable";
 
 export interface AppStudentUser {
@@ -130,6 +130,7 @@ export async function registerStudent(
     await initializeUserProfile(cred.user, trimmedName);
     finalUid = cred.user.uid;
     firebaseSuccess = true;
+    ensureSistecTimetableLoaded(finalUid).catch(console.warn);
   } catch (err: any) {
     const code = err?.code || "";
     if (code === "auth/email-already-in-use") {
@@ -206,6 +207,7 @@ export async function loginStudent(
   try {
     const cred = await signInWithEmailAndPassword(auth, trimmedEmail, pass);
     await initializeUserProfile(cred.user, cred.user.displayName || "Student");
+    ensureSistecTimetableLoaded(cred.user.uid).catch(console.warn);
     const studentUser: AppStudentUser = {
       uid: cred.user.uid,
       email: trimmedEmail,
