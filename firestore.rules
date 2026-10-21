@@ -25,9 +25,16 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }
 
-      // Student's class sessions
+      // Student's class sessions (Permanent locking of Present and ERP records)
       match /classSessions/{sessionId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid;
+        allow update: if request.auth != null && request.auth.uid == uid
+          // Present is strictly immutable: once marked Present, it can never be changed to Absent or Upcoming
+          && (resource.data.personalStatus != 'present' || request.resource.data.personalStatus == 'present')
+          // Once ERP status is recorded, it is locked and cannot be changed or overwritten
+          && (resource.data.erpStatus == null || request.resource.data.erpStatus == resource.data.erpStatus);
+        allow delete: if request.auth != null && request.auth.uid == uid;
       }
 
       // Student's attendance events

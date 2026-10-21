@@ -912,7 +912,8 @@ function SessionLink({ session }: { session: ClassSessionItem }) {
 function AttendanceCardDialog({
   open,
   onOpenChange,
-  session,
+  session: initialSession,
+  sessions,
   user,
   onRecordErp,
   onMarkPresent,
@@ -922,12 +923,18 @@ function AttendanceCardDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   session: ClassSessionItem | null;
+  sessions?: ClassSessionItem[];
   user: { uid: string; email?: string | null; displayName?: string | null };
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
-  onMarkPresent?: (sessionId: string, photoUrl?: string) => Promise<void>;
-  onMarkAbsent?: (sessionId: string) => Promise<void>;
+  onMarkPresent?: (sessionId: string, photoUrl?: string, note?: string) => Promise<void>;
+  onMarkAbsent?: (sessionId: string, note?: string) => Promise<void>;
   onFreezeClass?: (sessionId: string) => Promise<void>;
 }) {
+  // Always derive the most authoritative, live session state from the parent sessions listener
+  const session = initialSession
+    ? (sessions?.find((s) => s.id === initialSession.id) || initialSession)
+    : null;
+
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -940,7 +947,7 @@ function AttendanceCardDialog({
   
   const { 
     videoRef, 
-    stream,
+    stream, 
     startCamera, 
     stopCamera, 
     cameraError, 
@@ -948,7 +955,16 @@ function AttendanceCardDialog({
   } = useCamera({ idealFacingMode: "user" });
 
   useEffect(() => {
-    if (!open || !session || !user || !session.evidenceAvailable || !auth.currentUser) {
+    if (!open || !session) {
+      setEvidencePhotoUrl(null);
+      return;
+    }
+    // Directly use photo data URL from document if available
+    if (session.photoDataUrl) {
+      setEvidencePhotoUrl(session.photoDataUrl);
+      return;
+    }
+    if (!session.evidenceAvailable || !user || !auth.currentUser) {
       setEvidencePhotoUrl(null);
       return;
     }
@@ -966,26 +982,35 @@ function AttendanceCardDialog({
       }
     };
     fetchEvidence();
-  }, [open, session?.id, session?.evidenceAvailable, user?.uid]);
+  }, [open, session?.id, session?.photoDataUrl, session?.evidenceAvailable, user?.uid]);
+
+  const snapPhoto = () => {
+    if (!videoRef.current) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = videoRef.current.videoWidth || 640;
+    canvas.height = videoRef.current.videoHeight || 480;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+      setCapturedPhotoUrl(dataUrl);
+    }
+    stopCamera();
+  };
+
+  const [stagedPersonalStatus, setStagedPersonalStatus] = useState<string | null>(null);
+  const [stagedErpStatus, setStagedErpStatus] = useState<string | null>(null);
+  const [stagedNote, setStagedNote] = useState<string>("");
 
   useEffect(() => {
-    setNoteInput(session?.note || "");
-  }, [session?.id, session?.note]);
-
-  const handleSaveNote = async () => {
-    if (!session) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await updateSessionNote(user.uid, session.id, noteInput);
-      setNotice("Keynote/Note successfully saved and bounded to class attendance record.");
-    } catch (err: any) {
-      setError(err?.message || "Could not save note.");
-    } finally {
-      setBusy(false);
+    if (session) {
+      setStagedPersonalStatus(session.personalStatus);
+      setStagedErpStatus(session.erpStatus);
+      setStagedNote(session.note || "");
+      setNoteInput(session.note || "");
+      setConfirmFreeze(false);
     }
-  };
+  }, [session?.id, session?.personalStatus, session?.erpStatus, session?.note]);
 
   const todayKey = formatDateKey(new Date());
   const isToday = session?.scheduledDate === todayKey;
@@ -993,9 +1018,11 @@ function AttendanceCardDialog({
   const nowMs = Date.now();
   const startMs = session ? new Date(session.scheduledStartAt).getTime() : 0;
   const endMs = session ? new Date(session.scheduledEndAt).getTime() : 0;
-  const inWindow = Boolean(isToday && session && !session.finalized && nowMs >= startMs && nowMs < endMs);
+  const isFrozen = stagedPersonalStatus === "frozen" || session?.personalStatus === "frozen";
+  const isPresentAlready = session?.personalStatus === "present";
+  const inWindow = Boolean(isToday && session && !session.finalized && !isPresentAlready && nowMs >= startMs && nowMs < endMs);
   const isWindowOverdue = Boolean(
-    session && (session.personalStatus === "absent" || (isToday && nowMs >= endMs))
+    session && !isPresentAlready && (session.personalStatus === "absent" || (isToday && nowMs >= endMs))
   );
 
   // Active window countdown
@@ -1019,6 +1046,7 @@ function AttendanceCardDialog({
       stopCamera();
       setNotice(null);
       setError(null);
+      setCapturedPhotoUrl(null);
     }
   }, [open, stopCamera]);
 
@@ -1044,54 +1072,22 @@ function AttendanceCardDialog({
     return () => unsub();
   }, [open, session?.id, user?.uid]);
 
-  const snapPhoto = () => {
-    if (!videoRef.current) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = videoRef.current.videoWidth || 640;
-    canvas.height = videoRef.current.videoHeight || 480;
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
-      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-      
-      // Add server-side timestamp to evidence metadata
-      const capturedAt = new Date().toISOString(); 
-      setCapturedPhotoUrl(dataUrl);
-      // In a real app, you'd store this 'capturedAt' with the photo metadata
-      console.log("Photo captured at:", capturedAt);
-    }
-    stopCamera();
-  };
-
-
-  const [stagedPersonalStatus, setStagedPersonalStatus] = useState<string | null>(null);
-  const [stagedErpStatus, setStagedErpStatus] = useState<string | null>(null);
-  const [stagedNote, setStagedNote] = useState<string>("");
-
-  useEffect(() => {
-    if (session) {
-      setStagedPersonalStatus(session.personalStatus);
-      setStagedErpStatus(session.erpStatus);
-      setStagedNote(session.note || "");
-      setConfirmFreeze(false);
-    }
-  }, [session?.id, session?.personalStatus, session?.erpStatus, session?.note]);
-
-  const isFrozen = stagedPersonalStatus === "frozen" || session?.personalStatus === "frozen";
-
   const handleStagePresent = () => {
+    if (isPresentAlready) return;
     setStagedPersonalStatus("present");
     setNotice("Staged: AttendWise attendance marked Present. Click 'Save Status' below to commit.");
     setError(null);
   };
 
   const handleStageAbsent = () => {
+    if (isPresentAlready) return;
     setStagedPersonalStatus("absent");
     setNotice("Staged: AttendWise attendance marked Absent by student. Click 'Save Status' below to commit.");
     setError(null);
   };
 
   const handleStageErp = (status: "Present" | "Absent") => {
+    if (session?.erpStatus) return;
     setStagedErpStatus(status);
     setNotice(`Staged: ERP status recorded as ${status}. Click 'Save Status' below to commit.`);
     setError(null);
@@ -1110,20 +1106,24 @@ function AttendanceCardDialog({
     setError(null);
     setNotice(null);
     try {
+      const finalNote = stagedNote.trim() || noteInput.trim() || undefined;
+
+      // 1. Mark AttendWise Present (only allowed if not already present)
       if (stagedPersonalStatus === "present" && session.personalStatus !== "present") {
         if (onMarkPresent) {
-          await onMarkPresent(session.id, capturedPhotoUrl || undefined);
+          await onMarkPresent(session.id, capturedPhotoUrl || undefined, finalNote);
         } else {
-          await markSessionPresent(user.uid, session.id, capturedPhotoUrl || undefined);
+          await markSessionPresent(user.uid, session.id, capturedPhotoUrl || undefined, finalNote);
         }
       } else if (stagedPersonalStatus === "absent" && session.personalStatus !== "absent") {
         if (onMarkAbsent) {
-          await onMarkAbsent(session.id);
+          await onMarkAbsent(session.id, finalNote);
         } else {
-          await markSessionAbsent(user.uid, session.id);
+          await markSessionAbsent(user.uid, session.id, finalNote);
         }
       }
 
+      // 2. Mark College ERP Status (independent, one-time locked)
       if (stagedErpStatus && !session.erpStatus) {
         if (onRecordErp) {
           await onRecordErp(session.id, stagedErpStatus as any);
@@ -1132,11 +1132,12 @@ function AttendanceCardDialog({
         }
       }
 
-      if (stagedNote && !session.note) {
-        await updateSessionNote(user.uid, session.id, stagedNote);
+      // 3. Save Keynote if not already saved
+      if (finalNote && !session.note) {
+        await updateSessionNote(user.uid, session.id, finalNote);
       }
 
-      setNotice("All attendance status and keynote saved successfully!");
+      setNotice("All attendance status, photo proof, and keynote saved permanently!");
       setTimeout(() => {
         onOpenChange(false);
       }, 700);
@@ -1155,6 +1156,13 @@ function AttendanceCardDialog({
       : null;
 
   const currentStatusLabel = isFrozen ? "Class Frozen (Excluded)" : sessionStatusLabel(session);
+
+  const hasUnsavedChanges = Boolean(
+    (!isPresentAlready && stagedPersonalStatus === "present") ||
+    (!session.finalized && stagedPersonalStatus === "absent" && session.personalStatus !== "absent") ||
+    (!session.erpStatus && stagedErpStatus) ||
+    (!session.note && (noteInput.trim() || stagedNote.trim()))
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1200,8 +1208,18 @@ function AttendanceCardDialog({
             </Alert>
           ) : null}
 
-          {/* Live countdown or status alert */}
-          {!isFrozen && inWindow ? (
+          {/* Live countdown or status banner */}
+          {isFrozen ? null : isPresentAlready ? (
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 text-center">
+              <div className="flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-300 font-semibold text-xs sm:text-sm">
+                <Check className="h-4 w-4 text-emerald-600" />
+                Attendance Finalized & Locked (Present)
+              </div>
+              <p className="mt-0.5 text-xs text-emerald-600 dark:text-emerald-400">
+                Authoritative server timestamp verified: <strong>{session.serverReceiptAt ? `${formatClock(session.serverReceiptAt)} IST` : "Verified"}</strong>
+              </p>
+            </div>
+          ) : inWindow ? (
             <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center">
               <div className="flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-300 font-semibold text-sm">
                 <span className="relative flex h-3 w-3">
@@ -1214,7 +1232,7 @@ function AttendanceCardDialog({
                 Live countdown until the window closes: <strong className="font-mono text-sm">{countdownText}</strong>
               </p>
             </div>
-          ) : !isFrozen && isToday && !session.finalized && nowMs < startMs ? (
+          ) : isToday && !session.finalized && nowMs < startMs ? (
             <div className="rounded-xl border bg-muted/40 p-3.5 text-center text-xs text-muted-foreground">
               <Clock3 className="h-4 w-4 mx-auto mb-1 text-muted-foreground" />
               Upcoming class · Attendance window opens at <strong>{formatClock(session.scheduledStartAt)} IST</strong>
@@ -1238,6 +1256,10 @@ function AttendanceCardDialog({
                   <Badge className="bg-sky-500/15 text-sky-800 dark:text-sky-300 border-sky-500/30 text-xs">
                     <Snowflake className="h-3 w-3 mr-1" /> Class Frozen (Excluded)
                   </Badge>
+                ) : session.personalStatus === "present" ? (
+                  <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs">
+                    <Check className="h-3 w-3 mr-1" /> Present (Locked)
+                  </Badge>
                 ) : stagedPersonalStatus === "present" ? (
                   <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs">
                     <Check className="h-3 w-3 mr-1" /> Present (Staged / Locked)
@@ -1245,10 +1267,6 @@ function AttendanceCardDialog({
                 ) : stagedPersonalStatus === "absent" ? (
                   <Badge variant="destructive" className="bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30 text-xs">
                     <X className="h-3 w-3 mr-1" /> Marked Absent by Student (Staged)
-                  </Badge>
-                ) : session.personalStatus === "present" ? (
-                  <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs">
-                    <Check className="h-3 w-3 mr-1" /> Present (Locked)
                   </Badge>
                 ) : session.personalStatus === "absent" || isWindowOverdue ? (
                   <Badge variant="destructive" className="bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30 text-xs">
@@ -1274,12 +1292,37 @@ function AttendanceCardDialog({
                   <span>Class Is Freezed (Permanently Cancelled)</span>
                 </div>
                 <p className="text-xs text-sky-800/90 dark:text-sky-300/90 leading-relaxed">
-                  This class session is frozen and treated as cancelled. It has been completely abducted and excluded from all attendance calculations, percentages, subject totals, and college dashboards.
+                  This class session is frozen and treated as cancelled. It has been completely excluded from all attendance calculations, percentages, subject totals, and college dashboards.
                 </p>
                 <div className="flex items-center gap-2 text-[11px] font-medium text-sky-700 dark:text-sky-400 pt-1 border-t border-sky-200/60 dark:border-sky-800/60">
                   <Lock className="h-3.5 w-3.5" />
                   <span>Permanent & Immutable · No further attendance or ERP changes allowed</span>
                 </div>
+              </div>
+            ) : session.personalStatus === "present" ? (
+              <div className="rounded-lg bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 p-3.5 text-xs space-y-2.5">
+                <p className="font-semibold text-emerald-800 dark:text-emerald-200 flex items-center gap-1.5 text-sm">
+                  <Check className="h-4 w-4 text-emerald-600" /> Attendance Receipt Recorded & Permanently Locked
+                </p>
+                <p className="text-emerald-700 dark:text-emerald-300">
+                  Server IST Receipt: <strong>{session.serverReceiptAt ? `${formatClock(session.serverReceiptAt)} IST` : "Recorded"}</strong>
+                  {session.scheduledDate ? ` · Date: ${formatDate(session.scheduledDate)}` : ""}
+                </p>
+                {(session.photoDataUrl || evidencePhotoUrl) ? (
+                  <div className="space-y-1 pt-1">
+                    <span className="text-[11px] font-medium text-emerald-800 dark:text-emerald-200 block">
+                      Live Captured Proof Photo:
+                    </span>
+                    <img
+                      src={session.photoDataUrl || evidencePhotoUrl || ""}
+                      alt="Captured live proof"
+                      className="w-full h-40 object-cover rounded-md border"
+                    />
+                  </div>
+                ) : null}
+                <p className="text-[11px] text-muted-foreground pt-1 border-t border-emerald-200/60 dark:border-emerald-800/60">
+                  Authoritative server receipt logged. This record is permanent, strictly one-time, and cannot be edited, overwritten, or changed to absent.
+                </p>
               </div>
             ) : inWindow ? (
               <div className="space-y-3 pt-2">
@@ -1289,7 +1332,7 @@ function AttendanceCardDialog({
                     <span className="text-xs font-medium flex items-center gap-1.5">
                       <Camera className="h-3.5 w-3.5 text-primary" /> Capture Live Photo (Optional)
                     </span>
-                    <span className="text-[10px] text-muted-foreground">Capture helps validate privacy</span>
+                    <span className="text-[10px] text-muted-foreground">Snapshot proof stored with record</span>
                   </div>
 
                   {stream ? (
@@ -1323,8 +1366,8 @@ function AttendanceCardDialog({
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {error && (
-                        <p className="text-xs text-rose-600 bg-rose-50 p-2 rounded">{error}</p>
+                      {cameraError && (
+                        <p className="text-xs text-rose-600 bg-rose-50 p-2 rounded">{cameraError}</p>
                       )}
                       <Button
                         type="button"
@@ -1333,7 +1376,7 @@ function AttendanceCardDialog({
                         onClick={startCamera}
                         className="w-full text-xs"
                       >
-                        <Camera className="h-3.5 w-3.5 mr-1.5" /> {error ? "Retry Camera" : "Enable Live Camera (Optional)"}
+                        <Camera className="h-3.5 w-3.5 mr-1.5" /> {cameraError ? "Retry Camera" : "Enable Live Camera (Optional)"}
                       </Button>
                     </div>
                   )}
@@ -1365,31 +1408,15 @@ function AttendanceCardDialog({
                   </Button>
                 </div>
               </div>
-            ) : session.personalStatus === "present" ? (
-              <div className="rounded-lg bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 p-3 text-xs space-y-2">
-                <p className="font-semibold text-emerald-800 dark:text-emerald-200 flex items-center gap-1.5">
-                  <Check className="h-3.5 w-3.5" /> Attendance Receipt Recorded
-                </p>
-                <p className="text-emerald-700 dark:text-emerald-300">
-                  Recorded at: <strong>{session.serverReceiptAt ? `${formatClock(session.serverReceiptAt)} IST` : "Recorded"}</strong>
-                </p>
-                {evidencePhotoUrl ? (
-                  <div className="space-y-1 pt-1">
-                    <span className="text-[11px] font-medium text-emerald-800 dark:text-emerald-200 block">Captured Proof Photo:</span>
-                    <img src={evidencePhotoUrl} alt="Captured proof" className="w-full h-32 object-cover rounded-md border" />
-                  </div>
-                ) : null}
-                <p className="text-[11px] text-muted-foreground">
-                  Authoritative server receipt logged. This record is locked and cannot be edited.
-                </p>
-              </div>
             ) : isWindowOverdue ? (
               <div className="rounded-lg bg-rose-50/60 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 p-3 text-xs space-y-1">
                 <p className="font-semibold text-rose-800 dark:text-rose-200 flex items-center gap-1.5">
-                  <X className="h-3.5 w-3.5" /> Attendance Window Closed
+                  <X className="h-3.5 w-3.5" /> {session.absentType === "manual_student" ? "Marked Absent by Student" : "Attendance Window Closed — Automatically Marked Absent"}
                 </p>
                 <p className="text-rose-700 dark:text-rose-300">
-                  Class interval ({formatClock(session.scheduledStartAt)} – {formatClock(session.scheduledEndAt)} IST) elapsed. Automatically finalized as Absent on AttendWise.
+                  {session.absentType === "manual_student"
+                    ? "Recorded as Absent by student explicitly during the class session."
+                    : `Class interval (${formatClock(session.scheduledStartAt)} – ${formatClock(session.scheduledEndAt)} IST) elapsed without a valid Present mark. Automatically finalized as Absent on AttendWise.`}
                 </p>
                 <p className="text-[11px] text-muted-foreground">
                   Finalized on AttendWise and uneditable.
@@ -1402,7 +1429,7 @@ function AttendanceCardDialog({
             )}
           </div>
 
-          {/* College ERP Attendance Section */}
+          {/* College ERP Attendance Section - Independent and recordable before, during, or after class */}
           <div className="rounded-xl border p-4 bg-muted/20 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
@@ -1411,7 +1438,7 @@ function AttendanceCardDialog({
                   Mark Attendance on ERP
                 </h4>
                 <p className="text-[11px] text-muted-foreground">
-                  Record attendance status observed on official college ERP portal
+                  Record official college ERP portal status (independent from AttendWise)
                 </p>
               </div>
               {session.erpStatus ? (
@@ -1425,6 +1452,10 @@ function AttendanceCardDialog({
                 >
                   ERP: {session.erpStatus} (Locked)
                 </Badge>
+              ) : stagedErpStatus ? (
+                <Badge variant="outline" className="text-xs text-primary border-primary/30">
+                  ERP: {stagedErpStatus} (Staged)
+                </Badge>
               ) : (
                 <Badge variant="outline" className="text-xs text-muted-foreground">
                   ERP: Not Recorded
@@ -1432,145 +1463,14 @@ function AttendanceCardDialog({
               )}
             </div>
 
-            {/* Note / Keynote Section (One-time save, immutable & read-only once saved) */}
-            {session.note ? (
-              <div className="rounded-xl border p-4 bg-muted/20 space-y-2 mb-4">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-semibold flex items-center gap-1.5 text-foreground">
-                    <BookOpen className="h-3.5 w-3.5 text-primary" />
-                    Message / Keynote (Locked & Immutable)
-                  </h4>
-                  <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary">
-                    Saved & Read-Only
-                  </Badge>
-                </div>
-                <p className="text-xs font-semibold text-foreground bg-card p-2.5 rounded border">
-                  &quot;{session.note}&quot;
-                </p>
-                <p className="text-[10px] text-muted-foreground">
-                  Keynote is permanently bounded to this class record and cannot be altered.
-                </p>
-              </div>
-            ) : (
-              <div className="rounded-xl border p-4 bg-muted/20 space-y-2.5 mb-4">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-semibold flex items-center gap-1.5">
-                    <BookOpen className="h-3.5 w-3.5 text-primary" />
-                    Message / Keynote (Optional)
-                  </h4>
-                  <span className="text-[10px] text-muted-foreground">e.g., Expert lecture in EC Audi</span>
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Add a note or excuse regarding class timings or unexpected changes. Once saved, it becomes permanent, immutable, and uneditable.
-                </p>
-                <div className="flex gap-2">
-                  <Input
-                    value={noteInput}
-                    onChange={(e) => setNoteInput(e.target.value)}
-                    placeholder="Write keynote / note here..."
-                    className="text-xs h-8"
-                    disabled={busy}
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="text-xs h-8 shrink-0"
-                    disabled={busy || !noteInput.trim()}
-                    onClick={handleStageNote}
-                  >
-                    Stage Keynote
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {/* Freeze Class Option */}
-            {isFrozen ? (
-              <div className="rounded-xl border p-4 bg-sky-500/10 border-sky-500/20 text-sky-900 dark:text-sky-200 text-xs font-semibold text-center flex items-center justify-center gap-2">
-                <Snowflake className="h-4 w-4 text-sky-600 dark:text-sky-400" /> Class Is Freezed (Permanently Cancelled & Excluded)
-              </div>
-            ) : (
-              <div className="rounded-xl border p-4 bg-rose-50/50 border-rose-100 dark:bg-rose-950/20 dark:border-rose-900/50 space-y-2">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-semibold text-rose-800 dark:text-rose-300 flex items-center gap-1.5">
-                    <Snowflake className="h-4 w-4 text-rose-600" /> Freeze Class (Cancel & Exclude)
-                  </h4>
-                  <Badge variant="outline" className="text-[10px] text-rose-700 border-rose-200 dark:border-rose-800">
-                    1-Time Immutable
-                  </Badge>
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Freezing this class permanently treats it as cancelled and abducts it from all attendance calculations, percentages, and totals. Once frozen, it can <strong>never be altered or counted</strong>.
-                </p>
-
-                {confirmFreeze ? (
-                  <div className="rounded-lg border border-rose-300 bg-rose-100/70 dark:bg-rose-950/60 p-3 space-y-2.5">
-                    <p className="text-xs font-semibold text-rose-900 dark:text-rose-200 flex items-center gap-1.5">
-                      <AlertTriangle className="h-4 w-4 text-rose-600" /> Confirm Permanent Class Freeze?
-                    </p>
-                    <p className="text-[11px] text-rose-800 dark:text-rose-300">
-                      This class will be permanently removed from all calculations. This action is irreversible and one-time final.
-                    </p>
-                    <div className="flex gap-2 pt-1">
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        className="flex-1 text-xs h-8 bg-rose-600 hover:bg-rose-700 text-white"
-                        disabled={busy}
-                        onClick={async () => {
-                          setBusy(true);
-                          setError(null);
-                          try {
-                            setStagedPersonalStatus("frozen");
-                            if (onFreezeClass) {
-                              await onFreezeClass(session.id);
-                            } else {
-                              await freezeClassSession(user.uid, session.id);
-                            }
-                            setNotice("Class successfully frozen and permanently removed from all calculations.");
-                            setConfirmFreeze(false);
-                          } catch (err: any) {
-                            setError(err?.message || "Could not freeze class.");
-                          } finally {
-                            setBusy(false);
-                          }
-                        }}
-                      >
-                        {busy ? "Freezing..." : "Yes, Permanently Freeze Class"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="text-xs h-8"
-                        disabled={busy}
-                        onClick={() => setConfirmFreeze(false)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="w-full text-xs text-rose-700 border-rose-200 hover:bg-rose-100 hover:text-rose-800 dark:text-rose-400 dark:border-rose-800"
-                    onClick={() => setConfirmFreeze(true)}
-                    disabled={busy}
-                  >
-                    <Snowflake className="h-3.5 w-3.5 mr-1.5 text-rose-600" /> Permanently Freeze Class
-                  </Button>
-                )}
-              </div>
-            )}
-
-            {/* ERP uneditable check (Available always for one time only) */}
-            {!isFrozen && (session.erpStatus !== null && session.erpStatus !== undefined) ? (
+            {/* ERP uneditable check once entered */}
+            {!isFrozen && session.erpStatus !== null ? (
               <div className="rounded-lg bg-card p-3 border text-xs">
                 <p className="font-medium text-foreground flex items-center gap-1.5">
                   <ShieldCheck className="h-4 w-4 text-primary" /> ERP Record Finalized
                 </p>
                 <p className="text-muted-foreground text-[11px] mt-0.5">
-                  ERP status has been permanently recorded as <strong>{session.erpStatus}</strong> and cannot be altered.
+                  ERP status has been permanently recorded as <strong>{session.erpStatus}</strong> and cannot be altered or overwritten.
                 </p>
               </div>
             ) : !isFrozen ? (
@@ -1604,11 +1504,142 @@ function AttendanceCardDialog({
                   </Button>
                 </div>
                 <p className="text-[10px] text-muted-foreground text-center">
-                  Once saved, ERP status is permanent and uneditable.
+                  ERP attendance can be recorded before, during, or after class. Once saved, it is locked and immutable.
                 </p>
               </div>
             ) : null}
           </div>
+
+          {/* Note / Keynote Section (One-time save, immutable & read-only once saved) */}
+          {session.note ? (
+            <div className="rounded-xl border p-4 bg-muted/20 space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold flex items-center gap-1.5 text-foreground">
+                  <BookOpen className="h-3.5 w-3.5 text-primary" />
+                  Message / Keynote (Locked & Immutable)
+                </h4>
+                <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary">
+                  Saved & Read-Only
+                </Badge>
+              </div>
+              <p className="text-xs font-semibold text-foreground bg-card p-2.5 rounded border">
+                &quot;{session.note}&quot;
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                Keynote is permanently bounded to this class record and cannot be altered.
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-xl border p-4 bg-muted/20 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold flex items-center gap-1.5">
+                  <BookOpen className="h-3.5 w-3.5 text-primary" />
+                  Message / Keynote (Optional)
+                </h4>
+                <span className="text-[10px] text-muted-foreground">e.g., Expert lecture in EC Audi</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Add a note or explanation regarding class session or topic. Once saved, it becomes permanent, immutable, and uneditable.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  value={noteInput}
+                  onChange={(e) => setNoteInput(e.target.value)}
+                  placeholder="Write keynote / note here..."
+                  className="text-xs h-8"
+                  disabled={busy}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-xs h-8 shrink-0"
+                  disabled={busy || !noteInput.trim()}
+                  onClick={handleStageNote}
+                >
+                  Stage Keynote
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Freeze Class Option */}
+          {isFrozen ? (
+            <div className="rounded-xl border p-4 bg-sky-500/10 border-sky-500/20 text-sky-900 dark:text-sky-200 text-xs font-semibold text-center flex items-center justify-center gap-2">
+              <Snowflake className="h-4 w-4 text-sky-600 dark:text-sky-400" /> Class Is Freezed (Permanently Cancelled & Excluded)
+            </div>
+          ) : (
+            <div className="rounded-xl border p-4 bg-rose-50/50 border-rose-100 dark:bg-rose-950/20 dark:border-rose-900/50 space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold text-rose-800 dark:text-rose-300 flex items-center gap-1.5">
+                  <Snowflake className="h-4 w-4 text-rose-600" /> Freeze Class (Cancel & Exclude)
+                </h4>
+                <Badge variant="outline" className="text-[10px] text-rose-700 border-rose-200 dark:border-rose-800">
+                  1-Time Immutable
+                </Badge>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Freezing this class permanently treats it as cancelled and excludes it from all attendance calculations, percentages, and totals. Once frozen, it can <strong>never be altered or counted</strong>.
+              </p>
+
+              {confirmFreeze ? (
+                <div className="rounded-lg border border-rose-300 bg-rose-100/70 dark:bg-rose-950/60 p-3 space-y-2.5">
+                  <p className="text-xs font-semibold text-rose-900 dark:text-rose-200 flex items-center gap-1.5">
+                    <AlertTriangle className="h-4 w-4 text-rose-600" /> Confirm Permanent Class Freeze?
+                  </p>
+                  <p className="text-[11px] text-rose-800 dark:text-rose-300">
+                    This class will be permanently removed from all calculations. This action is irreversible and one-time final.
+                  </p>
+                  <div className="flex gap-2 pt-1">
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="flex-1 text-xs h-8 bg-rose-600 hover:bg-rose-700 text-white"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        setError(null);
+                        try {
+                          setStagedPersonalStatus("frozen");
+                          if (onFreezeClass) {
+                            await onFreezeClass(session.id);
+                          } else {
+                            await freezeClassSession(user.uid, session.id);
+                          }
+                          setNotice("Class successfully frozen and permanently removed from all calculations.");
+                          setConfirmFreeze(false);
+                        } catch (err: any) {
+                          setError(err?.message || "Could not freeze class.");
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      {busy ? "Freezing..." : "Yes, Permanently Freeze Class"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-xs h-8"
+                      disabled={busy}
+                      onClick={() => setConfirmFreeze(false)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-full text-xs text-rose-700 border-rose-200 hover:bg-rose-100 hover:text-rose-800 dark:text-rose-400 dark:border-rose-800"
+                  onClick={() => setConfirmFreeze(true)}
+                  disabled={busy}
+                >
+                  <Snowflake className="h-3.5 w-3.5 mr-1.5 text-rose-600" /> Permanently Freeze Class
+                </Button>
+              )}
+            </div>
+          )}
 
           {/* Attendance Details Table & Event Timeline */}
           <div className="rounded-xl border p-4 bg-card/60 space-y-3">
@@ -1675,7 +1706,7 @@ function AttendanceCardDialog({
           <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} className="text-xs">
             Close
           </Button>
-          {!isFrozen ? (
+          {!isFrozen && hasUnsavedChanges ? (
             <Button
               size="sm"
               className="text-xs font-semibold bg-primary text-primary-foreground shadow-xs gap-1.5"
@@ -1684,6 +1715,10 @@ function AttendanceCardDialog({
             >
               <Check className="h-4 w-4" /> Save Status
             </Button>
+          ) : !isFrozen && isPresentAlready && session.erpStatus !== null ? (
+            <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+              <CheckCircle2 className="h-3.5 w-3.5" /> All Records Locked & Synced
+            </span>
           ) : null}
         </DialogFooter>
       </DialogContent>
@@ -1970,6 +2005,27 @@ function Dashboard({
                           </Badge>
                         )}
                       </div>
+
+                      {session.personalStatus === "present" && (
+                        <div className="mt-1 flex items-center gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold">
+                          <Check className="h-3 w-3" />
+                          <span>Present Locked {session.serverReceiptAt ? `· ${formatClock(session.serverReceiptAt)} IST` : ""}</span>
+                        </div>
+                      )}
+                      {(session.photoDataUrl || session.evidenceAvailable || session.note) ? (
+                        <div className="flex items-center gap-1.5 flex-wrap mt-1 text-[10px]">
+                          {(session.photoDataUrl || session.evidenceAvailable) && (
+                            <span className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                              📷 Photo
+                            </span>
+                          )}
+                          {session.note && (
+                            <span className="bg-primary/10 text-primary px-1.5 py-0.5 rounded border border-primary/20 truncate max-w-[150px]">
+                              💬 {session.note}
+                            </span>
+                          )}
+                        </div>
+                      ) : null}
                     </div>
 
                     <Button
@@ -2165,6 +2221,20 @@ function Dashboard({
                         <span>{formatClock(session.scheduledStartAt)} – {formatClock(session.scheduledEndAt)} IST</span>
                         {session.room ? <span>· Room: {session.room}</span> : null}
                       </div>
+                      {(session.photoDataUrl || session.evidenceAvailable || session.note) ? (
+                        <div className="flex items-center gap-2 flex-wrap mt-1">
+                          {(session.photoDataUrl || session.evidenceAvailable) && (
+                            <span className="text-[11px] text-emerald-700 dark:text-emerald-300 font-medium bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                              📷 Photo
+                            </span>
+                          )}
+                          {session.note && (
+                            <span className="text-[11px] text-primary font-medium bg-primary/5 px-2 py-0.5 rounded border border-primary/20 flex items-center gap-1">
+                              💬 Keynote: {session.note}
+                            </span>
+                          )}
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
@@ -2220,6 +2290,7 @@ function Dashboard({
         open={cardDialogOpen}
         onOpenChange={setCardDialogOpen}
         session={selectedCardSession}
+        sessions={sessions}
         user={user}
         onRecordErp={onRecordErp}
         onMarkPresent={onMarkPresent}
@@ -2859,10 +2930,19 @@ function AttendanceHistory({
                         <span>{formatClock(session.scheduledStartAt)} – {formatClock(session.scheduledEndAt)} IST</span>
                         {session.room ? <span>· Room: {session.room}</span> : null}
                       </div>
-                      {session.note ? (
-                        <p className="mt-1.5 text-xs text-primary font-medium bg-primary/5 px-2 py-1 rounded border border-primary/20 inline-block">
-                          💬 Keynote: {session.note}
-                        </p>
+                      {(session.photoDataUrl || session.evidenceAvailable || session.note) ? (
+                        <div className="flex items-center gap-2 flex-wrap mt-1">
+                          {(session.photoDataUrl || session.evidenceAvailable) && (
+                            <span className="text-[11px] text-emerald-700 dark:text-emerald-300 font-medium bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                              📷 Photo
+                            </span>
+                          )}
+                          {session.note && (
+                            <span className="text-[11px] text-primary font-medium bg-primary/5 px-2 py-0.5 rounded border border-primary/20 flex items-center gap-1">
+                              💬 Keynote: {session.note}
+                            </span>
+                          )}
+                        </div>
                       ) : null}
                     </div>
 
@@ -2922,6 +3002,7 @@ function AttendanceHistory({
           open={dialogOpen}
           onOpenChange={setDialogOpen}
           session={selectedSession}
+          sessions={sessions}
           user={user}
           onRecordErp={onRecordErp}
           onMarkPresent={onMarkPresent}
@@ -3390,6 +3471,7 @@ function Comparison({
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         session={selectedSession}
+        sessions={sessions}
         user={user}
         onRecordErp={onRecordErp}
         onFreezeClass={async (sid) => {
@@ -3989,10 +4071,32 @@ function SessionDetail({
                 <div>
                   <p className="text-muted-foreground">Optional Photo Evidence</p>
                   <p className="mt-1 font-semibold">
-                    {session.evidenceAvailable ? "Photo Context Saved" : "No photo attached"}
+                    {(session.photoDataUrl || session.evidenceAvailable) ? "Photo Context Saved" : "No photo attached"}
                   </p>
                 </div>
               </div>
+
+              {(session.photoDataUrl || session.evidenceAvailable) ? (
+                <div className="rounded-lg border bg-muted/30 p-3 space-y-1.5">
+                  <p className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                    <Camera className="h-3.5 w-3.5" /> Captured Proof Photo (Locked)
+                  </p>
+                  {session.photoDataUrl ? (
+                    <img src={session.photoDataUrl} alt="Captured proof" className="w-full h-44 object-cover rounded-md border" />
+                  ) : (
+                    <p className="text-xs text-muted-foreground">Proof photo recorded in secure storage.</p>
+                  )}
+                </div>
+              ) : null}
+
+              {session.note ? (
+                <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
+                  <p className="text-xs font-semibold flex items-center gap-1.5">
+                    <BookOpen className="h-3.5 w-3.5 text-primary" /> Keynote / Explanation (Locked)
+                  </p>
+                  <p className="text-xs text-foreground bg-card p-2.5 rounded border font-medium">&quot;{session.note}&quot;</p>
+                </div>
+              ) : null}
 
               <Alert className="text-xs bg-muted/30">
                 <ShieldCheck className="h-4 w-4 text-primary" />
@@ -4151,7 +4255,7 @@ function SessionDetail({
                       ERP status has been permanently recorded as <strong>{session.erpStatus}</strong> and cannot be altered.
                     </p>
                   </div>
-                ) : session.scheduledDate === formatDateKey(new Date()) ? (
+                ) : (
                   <div className="space-y-2 pt-1">
                     <div className="grid grid-cols-2 gap-2">
                       <Button
@@ -4174,13 +4278,9 @@ function SessionDetail({
                       </Button>
                     </div>
                     <p className="text-[10px] text-muted-foreground text-center">
-                      Once recorded, ERP status is permanent and uneditable.
+                      ERP attendance can be recorded before, during, or after class. Once recorded, it is permanent and uneditable.
                     </p>
                   </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    ERP marking is only permitted on the scheduled class date.
-                  </p>
                 )}
               </div>
 
@@ -4359,8 +4459,16 @@ export default function App() {
   // Listen to Firebase Auth state
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
-      // Do not auto-login on initial visit; require sign in from landing page
-      setUser(null);
+      if (currentUser) {
+        setUser(currentUser);
+      } else {
+        const stored = getStoredActiveSession();
+        if (stored) {
+          setUser(stored);
+        } else {
+          setUser(null);
+        }
+      }
       setAuthLoading(false);
     });
 
@@ -4567,7 +4675,7 @@ export default function App() {
     }
   };
 
-  const handleMarkPresentQuick = async (sessionId: string, photoUrl?: string) => {
+  const handleMarkPresentQuick = async (sessionId: string, photoUrl?: string, note?: string) => {
     const nowIso = new Date().toISOString();
     // 1. Instant optimistic update:
     setSessions((prev) =>
@@ -4579,6 +4687,9 @@ export default function App() {
               finalized: true,
               finalizedAt: nowIso,
               serverReceiptAt: nowIso,
+              photoDataUrl: photoUrl || s.photoDataUrl,
+              evidenceAvailable: Boolean(photoUrl || s.photoDataUrl || s.evidenceAvailable),
+              note: note !== undefined ? note : s.note,
             }
           : s
       )
@@ -4588,14 +4699,16 @@ export default function App() {
       finalized: true,
       finalizedAt: nowIso,
       serverReceiptAt: nowIso,
+      ...(photoUrl ? { photoDataUrl: photoUrl, evidenceAvailable: true } : {}),
+      ...(note !== undefined ? { note } : {}),
     });
     // 2. Persist to Firestore:
     if (user && auth.currentUser) {
-      await markSessionPresent(user.uid, sessionId, photoUrl);
+      await markSessionPresent(user.uid, sessionId, photoUrl, note);
     }
   };
 
-  const handleMarkAbsentQuick = async (sessionId: string) => {
+  const handleMarkAbsentQuick = async (sessionId: string, note?: string) => {
     const nowIso = new Date().toISOString();
     setSessions((prev) =>
       prev.map((s) =>
@@ -4603,19 +4716,23 @@ export default function App() {
           ? {
               ...s,
               personalStatus: "absent",
+              absentType: "manual_student",
               finalized: true,
               finalizedAt: nowIso,
+              note: note !== undefined ? note : s.note,
             }
           : s
       )
     );
     persistLocalSessionOverride(sessionId, {
       personalStatus: "absent",
+      absentType: "manual_student",
       finalized: true,
       finalizedAt: nowIso,
+      ...(note !== undefined ? { note } : {}),
     });
     if (user && auth.currentUser) {
-      await markSessionAbsent(user.uid, sessionId);
+      await markSessionAbsent(user.uid, sessionId, note);
     }
   };
 

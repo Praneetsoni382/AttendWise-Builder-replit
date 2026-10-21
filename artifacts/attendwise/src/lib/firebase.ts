@@ -28,6 +28,7 @@ import {
   onSnapshot,
   serverTimestamp,
   getDocFromServer,
+  runTransaction,
 } from "firebase/firestore";
 import {
   getStorage,
@@ -192,6 +193,7 @@ export interface ClassSessionItem {
   room?: string | null;
   personalStatus: "upcoming" | "present" | "absent" | "cancelled" | "frozen" | "unmarked";
   erpStatus: "Present" | "Absent" | null;
+  erpRecordedAt?: string | null;
   note?: string | null;
   absentType?: "manual_student" | "automatic_overdue" | null;
   frozenAt?: string | null;
@@ -203,6 +205,7 @@ export interface ClassSessionItem {
   clientCaptureAt?: string | null;
   evidenceAvailable?: boolean;
   evidenceStoragePath?: string | null;
+  photoDataUrl?: string | null;
   academicDayNumber?: number | null;
   isSpecialTraining?: boolean;
   trainingProgram?: string;
@@ -858,188 +861,236 @@ export {
 };
 
 // Mark Present inside the exact scheduled window
+// Mark Present inside the exact scheduled window (Permanent & Immutable one-time save)
 export async function markSessionPresent(
   uid: string,
   sessionId: string,
-  evidenceDataUrl?: string
+  evidenceDataUrl?: string,
+  note?: string
 ): Promise<{ success: boolean; message: string }> {
   const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
-  const sessionSnap = await getDoc(sessionRef);
 
-  if (!sessionSnap.exists()) {
-    throw new Error("Class session not found.");
-  }
+  return await runTransaction(db, async (transaction) => {
+    const sessionSnap = await transaction.get(sessionRef);
+    let session: ClassSessionItem;
 
-  const session = sessionSnap.data() as ClassSessionItem;
-  if (session.personalStatus === "present" || session.personalStatus === "frozen") {
-    throw new Error("Attendance for this class session has already been recorded and is uneditable.");
-  }
-  if (session.finalized && session.personalStatus !== "upcoming" && session.personalStatus !== "unmarked") {
-    throw new Error("Attendance for this class session has already been recorded and is uneditable.");
-  }
-
-  const isHistoricalTraining = session.subjectId === PYTHON_TRAINING_SUBJECT.id || (session as any).isSpecialTraining;
-
-  if (!isHistoricalTraining) {
-    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
-    if (session.scheduledDate !== today) {
-      throw new Error("Attendance can only be marked for today's scheduled classes.");
+    if (!sessionSnap.exists()) {
+      const defaultData = buildDefaultSistecData(uid);
+      const found = defaultData.sessions.find((s) => s.id === sessionId);
+      if (!found) {
+        throw new Error("Class session not found.");
+      }
+      session = found;
+    } else {
+      session = sessionSnap.data() as ClassSessionItem;
     }
 
-    const now = Date.now();
-    const startMs = new Date(session.scheduledStartAt).getTime();
-    const endMs = new Date(session.scheduledEndAt).getTime();
-
-    // Strict interval check: scheduledStart <= trustedServerTime < scheduledEnd
-    if (now < startMs) {
-      const diffMins = Math.ceil((startMs - now) / 60000);
-      throw new Error(`Attendance window has not opened yet. Class begins in ${diffMins} minute(s).`);
+    // Strict Permanent Lock Check: Present is permanently immutable
+    if (session.personalStatus === "present") {
+      throw new Error("Attendance for this class session has already been recorded as Present and is permanently locked.");
+    }
+    if (session.finalized && session.personalStatus !== "upcoming" && session.personalStatus !== "unmarked") {
+      throw new Error("Attendance for this class session has already been finalized and is uneditable.");
+    }
+    if (session.personalStatus === "frozen") {
+      throw new Error("Cannot mark attendance for a frozen class session.");
+    }
+    if (session.personalStatus === "cancelled") {
+      throw new Error("Cannot mark attendance for a cancelled class session.");
     }
 
-    if (now >= endMs) {
-      // Automatically finalize as absent
-      await updateDoc(sessionRef, {
-        personalStatus: "absent",
-        finalized: true,
-        finalizedAt: new Date(endMs).toISOString(),
-      });
-      throw new Error("Attendance window closed at scheduled end time. The session has been recorded as Absent.");
+    const isHistoricalTraining = session.subjectId === PYTHON_TRAINING_SUBJECT.id || (session as any).isSpecialTraining;
+
+    if (!isHistoricalTraining) {
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+      if (session.scheduledDate !== today) {
+        throw new Error("Attendance can only be marked for today's scheduled classes.");
+      }
+
+      const now = Date.now();
+      const startMs = new Date(session.scheduledStartAt).getTime();
+      const endMs = new Date(session.scheduledEndAt).getTime();
+
+      // Strict interval check: scheduledStart <= trustedServerTime < scheduledEnd
+      if (now < startMs) {
+        const diffMins = Math.ceil((startMs - now) / 60000);
+        throw new Error(`Attendance window has not opened yet. Class begins in ${diffMins} minute(s).`);
+      }
+
+      if (now >= endMs) {
+        // Automatically finalize as absent only if window has elapsed
+        transaction.set(sessionRef, {
+          ...session,
+          personalStatus: "absent",
+          absentType: "automatic_overdue",
+          finalized: true,
+          finalizedAt: new Date(endMs).toISOString(),
+        }, { merge: true });
+        throw new Error("Attendance window closed at scheduled end time. The session has been recorded as Absent.");
+      }
     }
-  }
 
-  // Upload private evidence photo to Firebase Storage if captured
-  let evidenceStoragePath: string | null = null;
-  if (evidenceDataUrl) {
-    try {
-      const storageKey = `users/${uid}/evidence/${sessionId}_${Date.now()}.jpg`;
-      const evidenceRef = ref(storage, storageKey);
-      await uploadString(evidenceRef, evidenceDataUrl, "data_url");
-      evidenceStoragePath = storageKey;
+    const receiptAt = new Date().toISOString();
+    const cleanNote = note?.trim() || session.note || null;
+    const hasPhoto = Boolean(evidenceDataUrl || session.photoDataUrl);
 
-      // Save metadata document with dataUrl for instant proof display
+    // Atomically persist Present status, server receipt timestamp, live photo dataUrl, and keynote
+    transaction.set(sessionRef, {
+      ...session,
+      personalStatus: "present",
+      finalized: true,
+      finalizedAt: receiptAt,
+      serverReceiptAt: receiptAt,
+      clientCaptureAt: receiptAt,
+      evidenceAvailable: hasPhoto,
+      photoDataUrl: evidenceDataUrl || session.photoDataUrl || null,
+      note: cleanNote,
+    }, { merge: true });
+
+    // Record authoritative audit event
+    const eventRef = doc(db, "users", uid, "attendanceEvents", `event-${sessionId}-${Date.now()}`);
+    transaction.set(eventRef, {
+      id: `event-${sessionId}-${Date.now()}`,
+      sessionId,
+      eventType: isHistoricalTraining ? "training_present_marked" : "present_marked",
+      serverTimestamp: receiptAt,
+      message: isHistoricalTraining
+        ? "Python Training attendance marked Present by student."
+        : hasPhoto
+        ? "Attendance marked Present with live photo context and server receipt time."
+        : "Attendance marked Present with server receipt time.",
+    });
+
+    // Also persist metadata document for storage continuity
+    if (evidenceDataUrl) {
       const metaRef = doc(db, "users", uid, "evidenceMetadata", `meta-${sessionId}`);
-      await setDoc(metaRef, {
+      transaction.set(metaRef, {
         id: `meta-${sessionId}`,
         sessionId,
-        storagePath: storageKey,
         dataUrl: evidenceDataUrl,
-        clientCapturedAt: new Date().toISOString(),
-        uploadedAt: new Date().toISOString(),
+        clientCapturedAt: receiptAt,
+        uploadedAt: receiptAt,
       });
-    } catch (e) {
-      console.warn("Storage upload failed or skipped, proceeding with attendance mark:", e);
     }
-  }
 
-  const receiptAt = new Date().toISOString();
-  await updateDoc(sessionRef, {
-    personalStatus: "present",
-    finalized: true,
-    finalizedAt: receiptAt,
-    serverReceiptAt: receiptAt,
-    evidenceAvailable: Boolean(evidenceStoragePath),
-    evidenceStoragePath,
+    return { success: true, message: "Attendance recorded as Present (Verified & Uneditable)." };
   });
-
-  // Record audit event
-  const eventRef = doc(db, "users", uid, "attendanceEvents", `event-${sessionId}-${Date.now()}`);
-  await setDoc(eventRef, {
-    id: `event-${sessionId}-${Date.now()}`,
-    sessionId,
-    eventType: isHistoricalTraining ? "training_present_marked" : "present_marked",
-    serverTimestamp: receiptAt,
-    message: isHistoricalTraining
-      ? "Python Training attendance marked Present by student."
-      : evidenceStoragePath
-      ? "Attendance marked Present with photo evidence."
-      : "Attendance marked Present with server receipt time.",
-  });
-
-  return { success: true, message: "Attendance recorded as Present (Verified & Uneditable)." };
 }
 
 // Mark Absent manually on the attendance card (finalized and uneditable)
 export async function markSessionAbsent(
   uid: string,
-  sessionId: string
+  sessionId: string,
+  note?: string
 ): Promise<{ success: boolean; message: string }> {
   const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
-  const sessionSnap = await getDoc(sessionRef);
 
-  if (!sessionSnap.exists()) {
-    throw new Error("Class session not found.");
-  }
+  return await runTransaction(db, async (transaction) => {
+    const sessionSnap = await transaction.get(sessionRef);
+    let session: ClassSessionItem;
 
-  const session = sessionSnap.data() as ClassSessionItem;
-  if (session.personalStatus === "present" || session.personalStatus === "absent" || session.personalStatus === "frozen") {
-    throw new Error("Attendance for this class session is already recorded and is uneditable.");
-  }
-
-  const isHistoricalTraining = session.subjectId === PYTHON_TRAINING_SUBJECT.id || (session as any).isSpecialTraining;
-
-  if (!isHistoricalTraining) {
-    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
-    if (session.scheduledDate !== today) {
-      throw new Error("Attendance can only be marked for today's scheduled classes.");
+    if (!sessionSnap.exists()) {
+      const defaultData = buildDefaultSistecData(uid);
+      const found = defaultData.sessions.find((s) => s.id === sessionId);
+      if (!found) {
+        throw new Error("Class session not found.");
+      }
+      session = found;
+    } else {
+      session = sessionSnap.data() as ClassSessionItem;
     }
-  }
 
-  const nowIso = new Date().toISOString();
-  await updateDoc(sessionRef, {
-    personalStatus: "absent",
-    absentType: "manual_student",
-    finalized: true,
-    finalizedAt: nowIso,
+    // Strictly protect Present records from being changed to Absent
+    if (session.personalStatus === "present") {
+      throw new Error("Attendance for this class session has already been recorded as Present and is permanently locked.");
+    }
+    if (session.finalized || session.personalStatus === "absent" || session.personalStatus === "frozen") {
+      throw new Error("Attendance for this class session is already recorded and is uneditable.");
+    }
+
+    const isHistoricalTraining = session.subjectId === PYTHON_TRAINING_SUBJECT.id || (session as any).isSpecialTraining;
+
+    if (!isHistoricalTraining) {
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+      if (session.scheduledDate !== today) {
+        throw new Error("Attendance can only be marked for today's scheduled classes.");
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const cleanNote = note?.trim() || session.note || null;
+    transaction.set(sessionRef, {
+      ...session,
+      personalStatus: "absent",
+      absentType: "manual_student",
+      finalized: true,
+      finalizedAt: nowIso,
+      note: cleanNote,
+    }, { merge: true });
+
+    const eventRef = doc(db, "users", uid, "attendanceEvents", `event-absent-${sessionId}-${Date.now()}`);
+    transaction.set(eventRef, {
+      id: `event-absent-${sessionId}-${Date.now()}`,
+      sessionId,
+      eventType: isHistoricalTraining ? "training_absent_marked" : "absent_marked_student",
+      serverTimestamp: nowIso,
+      message: isHistoricalTraining
+        ? "Python Training attendance marked Absent by student (Uneditable)."
+        : "Attendance marked Absent by student (Uneditable).",
+    });
+
+    return { success: true, message: "Attendance marked Absent by student (Uneditable)." };
   });
-
-  const eventRef = doc(db, "users", uid, "attendanceEvents", `event-absent-${sessionId}-${Date.now()}`);
-  await setDoc(eventRef, {
-    id: `event-absent-${sessionId}-${Date.now()}`,
-    sessionId,
-    eventType: isHistoricalTraining ? "training_absent_marked" : "absent_marked_student",
-    serverTimestamp: nowIso,
-    message: isHistoricalTraining
-      ? "Python Training attendance marked Absent by student (Uneditable)."
-      : "Attendance marked Absent by student (Uneditable).",
-  });
-
-  return { success: true, message: "Attendance marked Absent by student (Uneditable)." };
 }
 
-// Record manual observed ERP status (strictly uneditable once entered, available for any date one time only)
+// Record manual observed ERP status (strictly uneditable once entered, available before, during or after class, one time only)
 export async function recordSessionErpStatus(
   uid: string,
   sessionId: string,
   status: "Present" | "Absent"
 ): Promise<void> {
   const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
-  const sessionSnap = await getDoc(sessionRef);
 
-  if (!sessionSnap.exists()) {
-    throw new Error("Class session not found.");
-  }
+  await runTransaction(db, async (transaction) => {
+    const sessionSnap = await transaction.get(sessionRef);
+    let session: ClassSessionItem;
 
-  const session = sessionSnap.data() as ClassSessionItem;
-  if (session.personalStatus === "cancelled") {
-    throw new Error("Cannot record ERP status for a cancelled class.");
-  }
+    if (!sessionSnap.exists()) {
+      const defaultData = buildDefaultSistecData(uid);
+      const found = defaultData.sessions.find((s) => s.id === sessionId);
+      if (!found) {
+        throw new Error("Class session not found.");
+      }
+      session = found;
+    } else {
+      session = sessionSnap.data() as ClassSessionItem;
+    }
 
-  // Once ERP is marked, it should not get entered after that (one time only check)
-  if (session.erpStatus !== null && session.erpStatus !== undefined) {
-    throw new Error("ERP attendance has already been recorded and is uneditable.");
-  }
+    if (session.personalStatus === "cancelled" || session.personalStatus === "frozen") {
+      throw new Error("Cannot record ERP status for a cancelled or frozen class.");
+    }
 
-  await updateDoc(sessionRef, {
-    erpStatus: status,
-  });
+    // Once ERP is marked, it should not get entered after that (strictly one time only check)
+    if (session.erpStatus !== null && session.erpStatus !== undefined) {
+      throw new Error("ERP attendance has already been recorded and is uneditable.");
+    }
 
-  const eventRef = doc(db, "users", uid, "attendanceEvents", `event-erp-${sessionId}-${Date.now()}`);
-  await setDoc(eventRef, {
-    id: `event-erp-${sessionId}-${Date.now()}`,
-    sessionId,
-    eventType: "erp_status_recorded",
-    serverTimestamp: new Date().toISOString(),
-    message: `ERP status recorded as ${status} (Permanent & Uneditable).`,
+    const nowIso = new Date().toISOString();
+    // ERP status update ONLY - strictly independent from AttendWise personal attendance
+    transaction.set(sessionRef, {
+      ...session,
+      erpStatus: status,
+      erpRecordedAt: nowIso,
+    }, { merge: true });
+
+    const eventRef = doc(db, "users", uid, "attendanceEvents", `event-erp-${sessionId}-${Date.now()}`);
+    transaction.set(eventRef, {
+      id: `event-erp-${sessionId}-${Date.now()}`,
+      sessionId,
+      eventType: "erp_status_recorded",
+      serverTimestamp: nowIso,
+      message: `ERP status recorded as ${status} (Permanent & Uneditable).`,
+    });
   });
 }
 
@@ -1050,32 +1101,43 @@ export async function updateSessionNote(
   note: string
 ): Promise<void> {
   const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
-  const sessionSnap = await getDoc(sessionRef);
 
-  if (!sessionSnap.exists()) {
-    throw new Error("Class session not found.");
-  }
+  await runTransaction(db, async (transaction) => {
+    const sessionSnap = await transaction.get(sessionRef);
+    let session: ClassSessionItem;
 
-  const session = sessionSnap.data() as ClassSessionItem;
-  if (session.note !== null && session.note !== undefined && session.note.trim() !== "") {
-    throw new Error("Keynote/Note has already been saved and is permanently immutable and uneditable.");
-  }
+    if (!sessionSnap.exists()) {
+      const defaultData = buildDefaultSistecData(uid);
+      const found = defaultData.sessions.find((s) => s.id === sessionId);
+      if (!found) {
+        throw new Error("Class session not found.");
+      }
+      session = found;
+    } else {
+      session = sessionSnap.data() as ClassSessionItem;
+    }
 
-  if (!note.trim()) {
-    throw new Error("Please enter a valid keynote/note.");
-  }
+    if (session.note !== null && session.note !== undefined && session.note.trim() !== "") {
+      throw new Error("Keynote/Note has already been saved and is permanently immutable and uneditable.");
+    }
 
-  await updateDoc(sessionRef, {
-    note: note.trim(),
-  });
+    if (!note.trim()) {
+      throw new Error("Please enter a valid keynote/note.");
+    }
 
-  const eventRef = doc(db, "users", uid, "attendanceEvents", `event-note-${sessionId}-${Date.now()}`);
-  await setDoc(eventRef, {
-    id: `event-note-${sessionId}-${Date.now()}`,
-    sessionId,
-    eventType: "note_updated",
-    serverTimestamp: new Date().toISOString(),
-    message: `Keynote saved permanently as "${note.trim()}" (Immutable & Uneditable).`,
+    transaction.set(sessionRef, {
+      ...session,
+      note: note.trim(),
+    }, { merge: true });
+
+    const eventRef = doc(db, "users", uid, "attendanceEvents", `event-note-${sessionId}-${Date.now()}`);
+    transaction.set(eventRef, {
+      id: `event-note-${sessionId}-${Date.now()}`,
+      sessionId,
+      eventType: "note_updated",
+      serverTimestamp: new Date().toISOString(),
+      message: `Keynote saved permanently as "${note.trim()}" (Immutable & Uneditable).`,
+    });
   });
 }
 
@@ -1111,7 +1173,7 @@ export async function cancelClassSession(uid: string, sessionId: string): Promis
   });
 }
 
-// Auto-finalize overdue sessions
+// Auto-finalize overdue sessions safely without ever overwriting Present records
 export async function finalizeExpiredSessionsForStudent(
   uid: string,
   sessions: ClassSessionItem[]
@@ -1124,24 +1186,44 @@ export async function finalizeExpiredSessionsForStudent(
   for (const session of overdueUpcoming) {
     try {
       const sessionRef = doc(db, "users", uid, "classSessions", session.id);
-      const finalizedAt = new Date(session.scheduledEndAt).toISOString();
-      await updateDoc(sessionRef, {
-        personalStatus: "absent",
-        absentType: "automatic_overdue",
-        finalized: true,
-        finalizedAt,
-      });
+      await runTransaction(db, async (transaction) => {
+        const snap = await transaction.get(sessionRef);
+        if (!snap.exists()) return;
+        const currentData = snap.data() as ClassSessionItem;
 
-      const eventRef = doc(db, "users", uid, "attendanceEvents", `event-fin-${session.id}-${Date.now()}`);
-      await setDoc(eventRef, {
-        id: `event-fin-${session.id}-${Date.now()}`,
-        sessionId: session.id,
-        eventType: "session_finalized_automatic",
-        serverTimestamp: finalizedAt,
-        message: "Attendance window closed; automatically recorded as Absent.",
+        // CRITICAL INVARIANT: Never overwrite Present, Frozen, Cancelled, or already finalized records!
+        if (
+          currentData.personalStatus === "present" ||
+          currentData.finalized ||
+          currentData.personalStatus === "frozen" ||
+          currentData.personalStatus === "cancelled" ||
+          currentData.personalStatus === "absent"
+        ) {
+          return;
+        }
+
+        const endMs = new Date(currentData.scheduledEndAt).getTime();
+        if (now < endMs) return;
+
+        const finalizedAt = new Date(currentData.scheduledEndAt).toISOString();
+        transaction.update(sessionRef, {
+          personalStatus: "absent",
+          absentType: "automatic_overdue",
+          finalized: true,
+          finalizedAt,
+        });
+
+        const eventRef = doc(db, "users", uid, "attendanceEvents", `event-fin-${session.id}-${Date.now()}`);
+        transaction.set(eventRef, {
+          id: `event-fin-${session.id}-${Date.now()}`,
+          sessionId: session.id,
+          eventType: "session_finalized_automatic",
+          serverTimestamp: finalizedAt,
+          message: "Attendance window closed; automatically recorded as Absent.",
+        });
       });
     } catch (e) {
-      console.warn("Error finalizing session:", session.id, e);
+      console.warn("Error finalizing session safely:", session.id, e);
     }
   }
 }
@@ -1303,7 +1385,8 @@ export function syncSessionsForDate(dateKey: string, isWorking: boolean) {
     let sessions: ClassSessionItem[] = rawSessions ? JSON.parse(rawSessions) : [];
 
     if (!isWorking) {
-      sessions = sessions.filter((s) => s.scheduledDate !== dateKey);
+      // Strictly protect Present and finalized sessions from ever being deleted
+      sessions = sessions.filter((s) => s.scheduledDate !== dateKey || s.personalStatus === "present" || s.finalized);
     } else {
       const existing = sessions.filter((s) => s.scheduledDate === dateKey);
       if (existing.length === 0) {
