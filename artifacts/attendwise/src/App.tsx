@@ -4458,16 +4458,23 @@ export default function App() {
 
   // Listen to Firebase Auth state
   useEffect(() => {
+    const sessionActive = sessionStorage.getItem("attendwise_session_active");
+    if (!sessionActive) {
+      // Fresh browser visit or website reopening: strictly clear persisted login session so Landing Page is shown
+      logOutStudent().catch(() => {});
+      logoutStudentUser();
+    }
+
     const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
-      if (currentUser) {
+      const activeFlag = sessionStorage.getItem("attendwise_session_active");
+      if (currentUser && activeFlag) {
         setUser(currentUser);
       } else {
-        const stored = getStoredActiveSession();
-        if (stored) {
-          setUser(stored);
-        } else {
-          setUser(null);
+        setUser(null);
+        if (currentUser && !activeFlag) {
+          logOutStudent().catch(() => {});
         }
+        logoutStudentUser();
       }
       setAuthLoading(false);
     });
@@ -4639,7 +4646,9 @@ export default function App() {
   }, [user]);
 
   const handleLogout = async () => {
+    sessionStorage.removeItem("attendwise_session_active");
     await logoutStudentUser();
+    await logOutStudent().catch(() => {});
     setUser(null);
     setProfile(null);
     setSubjects([]);
@@ -4800,6 +4809,7 @@ export default function App() {
 
   if (!user) {
     return <LandingPage onAuthSuccess={(loggedInUser) => {
+      sessionStorage.setItem("attendwise_session_active", "true");
       const active = loggedInUser || auth.currentUser || getStoredActiveSession();
       if (active) {
         setUser(active);
