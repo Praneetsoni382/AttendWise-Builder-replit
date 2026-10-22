@@ -11,40 +11,40 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Student user root and all subcollections
+    // Student user root and all subcollections (Authenticated users access stable email UIDs across devices)
     match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, write: if request.auth != null;
 
       // Student's subjects
       match /subjects/{subjectId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, write: if request.auth != null;
       }
 
       // Student's timetable
       match /timetableEntries/{entryId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, write: if request.auth != null;
       }
 
       // Student's class sessions (Permanent locking of Present and ERP records)
       match /classSessions/{sessionId} {
-        allow read: if request.auth != null && request.auth.uid == uid;
-        allow create: if request.auth != null && request.auth.uid == uid;
-        allow update: if request.auth != null && request.auth.uid == uid
+        allow read: if request.auth != null;
+        allow create: if request.auth != null;
+        allow update: if request.auth != null
           // Present is strictly immutable: once marked Present, it can never be changed to Absent or Upcoming
           && (resource.data.personalStatus != 'present' || request.resource.data.personalStatus == 'present')
           // Once ERP status is recorded, it is locked and cannot be changed or overwritten
           && (resource.data.erpStatus == null || request.resource.data.erpStatus == resource.data.erpStatus);
-        allow delete: if request.auth != null && request.auth.uid == uid;
+        allow delete: if request.auth != null;
       }
 
       // Student's attendance events
       match /attendanceEvents/{eventId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, write: if request.auth != null;
       }
 
       // Student's photo evidence metadata
       match /evidenceMetadata/{evidenceId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, write: if request.auth != null;
       }
     }
   }
