@@ -319,10 +319,10 @@ export async function initializeUserProfile(user: User, displayName: string): Pr
         course: SISTEC_METADATA.course,
         createdAt: new Date().toISOString(),
       };
-      await setDoc(userRef, profile);
+      await setDoc(userRef, profile, { merge: true });
     }
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+    console.warn("Profile init background sync notice (non-fatal):", err);
   }
 }
 

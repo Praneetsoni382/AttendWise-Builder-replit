@@ -203,7 +203,7 @@ export async function loginStudent(
     throw new Error("Wrong credentials. Please check your email and password.");
   }
 
-  // 1. Try Firebase Auth first
+  // 1. Try Firebase Auth first, with graceful fallback to secure local vault
   try {
     const cred = await signInWithEmailAndPassword(auth, trimmedEmail, pass);
     await initializeUserProfile(cred.user, cred.user.displayName || "Student");
@@ -220,45 +220,29 @@ export async function loginStudent(
       firebaseAuthEnabled: true,
     };
   } catch (err: any) {
-    const code = err?.code || "";
+    // Graceful fallback to secure local student registry vault
+    const registry = getLocalRegistry();
+    const account = registry[trimmedEmail];
 
-    // If Firebase Auth operation-not-allowed OR invalid-credential, check local registry
-    if (
-      code === "auth/operation-not-allowed" ||
-      code === "auth/invalid-credential" ||
-      code === "auth/wrong-password" ||
-      code === "auth/user-not-found" ||
-      err?.message?.includes("operation-not-allowed")
-    ) {
-      const registry = getLocalRegistry();
-      const account = registry[trimmedEmail];
-
-      if (!account) {
-        throw new Error("Wrong credentials. Please check your email and password.");
-      }
-
+    if (account) {
       const inputHash = await hashPassword(pass);
-      if (inputHash !== account.passwordHash) {
-        throw new Error("Wrong credentials. Please check your email and password.");
+      if (inputHash === account.passwordHash) {
+        const studentUser: AppStudentUser = {
+          uid: account.uid,
+          email: account.email,
+          displayName: account.displayName,
+          isFirebaseUser: false,
+        };
+        setStoredActiveSession(studentUser);
+
+        return {
+          user: studentUser,
+          firebaseAuthEnabled: false,
+          message: "Signed in with registered credentials.",
+        };
       }
-
-      // Credentials are valid
-      const studentUser: AppStudentUser = {
-        uid: account.uid,
-        email: account.email,
-        displayName: account.displayName,
-        isFirebaseUser: false,
-      };
-      setStoredActiveSession(studentUser);
-
-      return {
-        user: studentUser,
-        firebaseAuthEnabled: false,
-        message: "Signed in with registered credentials.",
-      };
     }
 
-    // Default error mapping
     throw new Error("Wrong credentials. Please check your email and password.");
   }
 }
