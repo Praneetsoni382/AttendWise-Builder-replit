@@ -32,7 +32,9 @@ import {
 import {
   registerStudent,
   loginStudent,
+  type AppStudentUser,
 } from "../lib/auth-service";
+import type { User as FirebaseUser } from "firebase/auth";
 import { resetStudentPassword } from "../lib/firebase";
 import {
   Dialog,
@@ -48,7 +50,7 @@ import { Label } from "@workspace/attendwise-design-system/components/ui/label";
 import { Alert, AlertDescription } from "@workspace/attendwise-design-system/components/ui/alert";
 
 interface LandingPageProps {
-  onAuthSuccess: () => void;
+  onAuthSuccess: (user?: AppStudentUser | FirebaseUser) => void;
 }
 
 export function LandingPage({ onAuthSuccess }: LandingPageProps) {
@@ -121,14 +123,17 @@ export function LandingPage({ onAuthSuccess }: LandingPageProps) {
     setInfoMsg("");
     setPending(true);
     try {
+      let loggedUser: AppStudentUser | undefined;
       if (mode === "signup") {
         const res = await registerStudent(email, password, name);
         if (res.message) setInfoMsg(res.message);
+        loggedUser = res.user;
       } else {
         const res = await loginStudent(email, password);
         if (res.message) setInfoMsg(res.message);
+        loggedUser = res.user;
       }
-      onAuthSuccess();
+      onAuthSuccess(loggedUser);
     } catch (err: any) {
       setError(err?.message || "Authentication failed. Check your credentials.");
     } finally {

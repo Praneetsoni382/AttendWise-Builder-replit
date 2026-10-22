@@ -1,9 +1,9 @@
 // Custom hook that fetches from IndexedDB cache first while background-syncing with Firestore
 import { useState, useEffect } from "react";
 import { dataManager, type DashboardData } from "../lib/data-manager";
-import type { FirebaseUser } from "firebase/auth";
+import type { User } from "firebase/auth";
 
-export function useCachedSessions(user?: FirebaseUser | null) {
+export function useCachedSessions(user?: User | { uid: string } | null) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -15,11 +15,12 @@ export function useCachedSessions(user?: FirebaseUser | null) {
       return;
     }
 
+    const currentUid = user.uid;
     let isMounted = true;
 
     async function loadData() {
       // 1. Load from IndexedDB cache first (0 Firestore reads on initial render)
-      const cached = await dataManager.getCachedDashboardData(user.uid);
+      const cached = await dataManager.getCachedDashboardData(currentUid);
       if (cached && isMounted) {
         setData(cached);
         setLoading(false);
@@ -28,7 +29,7 @@ export function useCachedSessions(user?: FirebaseUser | null) {
       // 2. Background sync with Firestore to minimize read operations while keeping fresh
       setSyncing(true);
       try {
-        const fresh = await dataManager.fetchAndCacheFreshData(user.uid);
+        const fresh = await dataManager.fetchAndCacheFreshData(currentUid);
         if (isMounted) {
           setData(fresh);
         }

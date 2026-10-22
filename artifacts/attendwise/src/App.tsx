@@ -131,6 +131,7 @@ import NotFound from "@/pages/not-found";
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   updateDoc,
   deleteDoc,
@@ -138,6 +139,8 @@ import {
   setDoc,
 } from "firebase/firestore";
 import type { User as FirebaseUser } from "firebase/auth";
+
+export type AppUser = FirebaseUser | AppStudentUser;
 
 const WEEK_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const dateFmt = new Intl.DateTimeFormat("en-IN", {
@@ -1132,9 +1135,13 @@ function AttendanceCardDialog({
         }
       }
 
-      // 3. Save Keynote if not already saved
-      if (finalNote && !session.note) {
-        await updateSessionNote(user.uid, session.id, finalNote);
+      // 3. Save Keynote if not already saved and personal status was not updated in this batch
+      if (finalNote && !session.note && stagedPersonalStatus === session.personalStatus) {
+        if (onRecordErp) { // or direct updateSessionNote
+          await updateSessionNote(user.uid, session.id, finalNote);
+        } else {
+          await updateSessionNote(user.uid, session.id, finalNote);
+        }
       }
 
       setNotice("All attendance status, photo proof, and keynote saved permanently!");
@@ -1737,7 +1744,7 @@ function Dashboard({
   onMarkAbsent,
   onFreezeClass,
 }: {
-  user: FirebaseUser;
+  user: AppUser;
   profile?: StudentProfile | null;
   sessions: ClassSessionItem[];
   subjects?: SubjectItem[];
@@ -2322,7 +2329,7 @@ function Timetable({
   timetable,
   subjects,
 }: {
-  user: FirebaseUser;
+  user: AppUser;
   timetable: TimetableItem[];
   subjects: SubjectItem[];
 }) {
@@ -2711,7 +2718,7 @@ function AttendanceHistory({
   onMarkAbsent,
   onFreezeClass,
 }: {
-  user?: FirebaseUser | null;
+  user?: AppUser | null;
   sessions: ClassSessionItem[];
   subjects: SubjectItem[];
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
@@ -3035,7 +3042,7 @@ function Subjects({
   subjects,
   sessions,
 }: {
-  user: FirebaseUser;
+  user: AppUser;
   subjects: SubjectItem[];
   sessions: ClassSessionItem[];
 }) {
@@ -3311,7 +3318,7 @@ function Comparison({
   onRecordErp,
   onFreezeClass,
 }: {
-  user: FirebaseUser;
+  user: AppUser;
   sessions: ClassSessionItem[];
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
   onFreezeClass?: (sessionId: string) => Promise<void>;
@@ -3834,7 +3841,7 @@ function SessionDetail({
   onRecordErp,
   onMarkPresent,
 }: {
-  user: FirebaseUser;
+  user: AppUser;
   sessionId: string;
   sessions: ClassSessionItem[];
   onRecordErp?: (sessionId: string, status: "Present" | "Absent") => Promise<void>;
@@ -4327,7 +4334,7 @@ function ProfileView({
   profile,
   onLogout,
 }: {
-  user: FirebaseUser;
+  user: AppUser;
   profile?: StudentProfile | null;
   onLogout: () => void;
 }) {
@@ -4643,6 +4650,8 @@ export default function App() {
         unsubSessions();
       };
     }
+
+    return () => {};
   }, [user]);
 
   const handleLogout = async () => {

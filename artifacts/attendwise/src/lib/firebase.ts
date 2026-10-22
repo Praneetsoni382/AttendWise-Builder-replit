@@ -44,6 +44,7 @@ import {
   SISTEC_TIME_SLOTS,
   PYTHON_TRAINING_SUBJECT,
   PYTHON_TRAINING_DATES,
+  type SistecSubjectSeed,
 } from "../data/sistec-timetable";
 import {
   isTeachingDay,
@@ -151,7 +152,7 @@ export interface SubjectItem {
   teacherName?: string | null;
   iconKey?: string;
   reviewNeeded?: boolean;
-  notes?: string;
+  notes?: string | null;
   isSpecialTraining?: boolean;
   totalScheduledSessions?: number;
   trainingStartDate?: string;
@@ -1426,6 +1427,7 @@ export function syncSessionsForDate(dateKey: string, isWorking: boolean) {
             cancelledAt: null,
             evidenceAvailable: false,
             academicDayNumber: 99,
+            createdAt: now.toISOString(),
           });
         }
       }

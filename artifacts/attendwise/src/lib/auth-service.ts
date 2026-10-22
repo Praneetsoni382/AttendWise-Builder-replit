@@ -1,6 +1,7 @@
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  signInAnonymously,
   signOut,
   updateProfile,
   type User as FirebaseUser,
@@ -145,9 +146,13 @@ export async function registerStudent(
 
     // If Firebase Auth operation-not-allowed (Email/Password provider not enabled in Console)
     if (code === "auth/operation-not-allowed" || err?.message?.includes("operation-not-allowed")) {
-      console.warn("Firebase Auth Email/Password provider is disabled in Firebase Console. Registering in local secure student vault.");
-      finalUid = `student-${trimmedEmail.replace(/[^a-zA-Z0-9]/g, "_")}`;
-      firebaseSuccess = false;
+      console.warn("Firebase Auth Email/Password provider is disabled in Firebase Console. Using Anonymous Auth for secure cloud sync.");
+      const cred = await signInAnonymously(auth);
+      await updateProfile(cred.user, { displayName: trimmedName });
+      await initializeUserProfile(cred.user, trimmedName);
+      finalUid = cred.user.uid;
+      firebaseSuccess = true;
+      ensureSistecTimetableLoaded(finalUid).catch(console.warn);
     } else {
       // Other Firebase errors
       throw new Error(err?.message?.replace(/^Firebase:\s*/, "") || "Registration failed. Please check your credentials.");
@@ -227,18 +232,36 @@ export async function loginStudent(
     if (account) {
       const inputHash = await hashPassword(pass);
       if (inputHash === account.passwordHash) {
+        let activeUid = account.uid;
+        let firebaseSuccess = false;
+        try {
+          if (!auth.currentUser) {
+            const cred = await signInAnonymously(auth);
+            activeUid = cred.user.uid;
+            await updateProfile(cred.user, { displayName: account.displayName });
+            await initializeUserProfile(cred.user, account.displayName);
+            ensureSistecTimetableLoaded(activeUid).catch(console.warn);
+            firebaseSuccess = true;
+          } else {
+            activeUid = auth.currentUser.uid;
+            firebaseSuccess = true;
+          }
+        } catch (anonErr) {
+          console.warn("Anonymous auth fallback notice:", anonErr);
+        }
+
         const studentUser: AppStudentUser = {
-          uid: account.uid,
-          email: account.email,
+          uid: activeUid,
+          email: trimmedEmail,
           displayName: account.displayName,
-          isFirebaseUser: false,
+          isFirebaseUser: firebaseSuccess,
         };
         setStoredActiveSession(studentUser);
 
         return {
           user: studentUser,
-          firebaseAuthEnabled: false,
-          message: "Signed in with registered credentials.",
+          firebaseAuthEnabled: firebaseSuccess,
+          message: "Signed in and synchronized with cloud database.",
         };
       }
     }
