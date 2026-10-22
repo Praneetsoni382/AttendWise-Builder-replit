@@ -3,8 +3,6 @@ import {
   getAuth,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
-  signInWithPopup,
-  GoogleAuthProvider,
   signOut,
   sendPasswordResetEmail,
   updateProfile,
@@ -59,7 +57,6 @@ const app = getApps().length > 0 ? getApps()[0]! : initializeApp(firebaseConfig)
 export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const storage = getStorage(app, firebaseConfig.storageBucket);
-export const googleProvider = new GoogleAuthProvider();
 
 export enum OperationType {
   CREATE = "create",
