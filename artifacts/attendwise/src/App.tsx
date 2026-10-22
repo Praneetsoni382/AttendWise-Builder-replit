@@ -40,6 +40,7 @@ import {
   Snowflake,
   Lock,
   AlertTriangle,
+  Loader2,
 } from "lucide-react";
 import AcademicCalendarView from "./pages/academic-calendar";
 import AnalyticsPage from "./pages/analytics";
@@ -341,7 +342,7 @@ const sessionStatusLabel = (session: ClassSessionItem, nowMs: number = Date.now(
   if (session.personalStatus === "absent") {
     return session.absentType === "manual_student" ? "Marked Absent by Student" : "Automatically Marked Absent";
   }
-  if (isSessionInWindow(session, nowMs)) return "In Run";
+  if (isSessionInWindow(session, nowMs)) return "Not Marked Yet (In Run)";
   const endMs = new Date(session.scheduledEndAt).getTime();
   if (!isNaN(endMs) && nowMs >= endMs) {
     return "Automatically Marked Absent";
@@ -353,7 +354,7 @@ function StateBadge({ status, children }: { status: string; children: ReactNode 
   const isFrozen = status === "frozen" || status === "Frozen" || status.includes("Frozen");
   const isPresent = status === "present" || status === "Present" || status === "match";
   const isAbsent = status === "absent" || status === "Absent" || status === "Automatically marked Absent" || status === "Marked Absent by Student" || status === "Automatically Marked Absent";
-  const isInRun = status === "in_run" || status === "In Run";
+  const isInRun = status === "in_run" || status === "In Run" || status.includes("In Run");
   const isCancelled = status === "cancelled" || status === "Cancelled";
   const isDiscrepancy = status === "potential_discrepancy";
 
@@ -1720,7 +1721,15 @@ function AttendanceCardDialog({
               disabled={busy}
               onClick={handleSaveAllStatus}
             >
-              <Check className="h-4 w-4" /> Save Status
+              {busy ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Saving to Cloud...
+                </>
+              ) : (
+                <>
+                  <Check className="h-4 w-4" /> Save Status
+                </>
+              )}
             </Button>
           ) : !isFrozen && isPresentAlready && session.erpStatus !== null ? (
             <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
@@ -1980,7 +1989,34 @@ function Dashboard({
                         <span className="flex h-6 w-8 items-center justify-center rounded-md bg-primary/10 text-primary font-mono font-bold text-xs">
                           {session.slot}
                         </span>
-                        <StateBadge status={statusLabel}>{statusLabel}</StateBadge>
+                        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                          {isFrozen ? (
+                            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10 text-sky-800 dark:text-sky-300 text-[10px]">
+                              Frozen
+                            </Badge>
+                          ) : inWindow ? (
+                            <Badge className="bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 text-[10px] animate-pulse">
+                              In Run
+                            </Badge>
+                          ) : nowMs < startMs ? (
+                            <Badge variant="outline" className="text-muted-foreground text-[10px]">
+                              Upcoming
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-muted-foreground text-[10px]">
+                              Closed
+                            </Badge>
+                          )}
+                          <StateBadge status={session.personalStatus === "present" ? "present" : session.personalStatus === "absent" ? "absent" : session.personalStatus === "frozen" ? "frozen" : "unmarked"}>
+                            {session.personalStatus === "present"
+                              ? "Present (Locked)"
+                              : session.personalStatus === "absent"
+                              ? session.absentType === "manual_student" ? "Absent (Student)" : "Absent (Auto)"
+                              : session.personalStatus === "frozen"
+                              ? "Excluded"
+                              : "Not Marked"}
+                          </StateBadge>
+                        </div>
                       </div>
 
                       <h4 className="mt-2 font-semibold text-sm line-clamp-1">{session.subjectName}</h4>
@@ -4464,24 +4500,14 @@ export default function App() {
   const [, setLocation] = useLocation();
 
   // Listen to Firebase Auth state
+  // Authoritative Firebase Auth state listener
   useEffect(() => {
-    const sessionActive = sessionStorage.getItem("attendwise_session_active");
-    if (!sessionActive) {
-      // Fresh browser visit or website reopening: strictly clear persisted login session so Landing Page is shown
-      logOutStudent().catch(() => {});
-      logoutStudentUser();
-    }
-
     const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
-      const activeFlag = sessionStorage.getItem("attendwise_session_active");
-      if (currentUser && activeFlag) {
+      if (currentUser) {
         setUser(currentUser);
       } else {
-        setUser(null);
-        if (currentUser && !activeFlag) {
-          logOutStudent().catch(() => {});
-        }
-        logoutStudentUser();
+        const stored = getStoredActiveSession();
+        setUser(stored);
       }
       setAuthLoading(false);
     });
@@ -4673,29 +4699,41 @@ export default function App() {
       const key = `attendwise_student_sessions_${user.uid}`;
       const existing = localStorage.getItem(key);
       const parsed = existing ? JSON.parse(existing) : {};
-      parsed[sessionId] = { ...(parsed[sessionId] || {}), ...patch };
+      // Sanitize: Do not store heavy raw base64 data URLs in localStorage
+      const { photoDataUrl, ...cleanPatch } = patch;
+      parsed[sessionId] = {
+        ...(parsed[sessionId] || {}),
+        ...cleanPatch,
+        ...(photoDataUrl || patch.evidenceAvailable ? { evidenceAvailable: true } : {}),
+      };
       localStorage.setItem(key, JSON.stringify(parsed));
     } catch (e) {
       console.warn("Failed to persist local session override:", e);
     }
   };
 
-  // Real-time optimistic action handlers for instant feedback on user actions:
+  // Authoritative cloud-confirmed action handlers (strictly non-optimistic)
   const handleRecordErp = async (sessionId: string, status: "Present" | "Absent") => {
-    // 1. Instant optimistic update so analytics recompute with 0ms delay:
+    if (!user) throw new Error("Authentication required.");
+    // 1. Authoritative write to Firestore FIRST:
+    if (auth.currentUser) {
+      await recordSessionErpStatus(user.uid, sessionId, status);
+    }
+    // 2. State update ONLY after database write succeeds:
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, erpStatus: status } : s))
     );
     persistLocalSessionOverride(sessionId, { erpStatus: status });
-    // 2. Persist to Firestore:
-    if (user && auth.currentUser) {
-      await recordSessionErpStatus(user.uid, sessionId, status);
-    }
   };
 
   const handleMarkPresentQuick = async (sessionId: string, photoUrl?: string, note?: string) => {
+    if (!user) throw new Error("Authentication required.");
     const nowIso = new Date().toISOString();
-    // 1. Instant optimistic update:
+    // 1. Authoritative write to Firestore FIRST (guarantees atomic locking & receipt):
+    if (auth.currentUser) {
+      await markSessionPresent(user.uid, sessionId, photoUrl, note);
+    }
+    // 2. Reconcile UI only after cloud confirmation:
     setSessions((prev) =>
       prev.map((s) =>
         s.id === sessionId
@@ -4717,17 +4755,19 @@ export default function App() {
       finalized: true,
       finalizedAt: nowIso,
       serverReceiptAt: nowIso,
-      ...(photoUrl ? { photoDataUrl: photoUrl, evidenceAvailable: true } : {}),
+      evidenceAvailable: Boolean(photoUrl),
       ...(note !== undefined ? { note } : {}),
     });
-    // 2. Persist to Firestore:
-    if (user && auth.currentUser) {
-      await markSessionPresent(user.uid, sessionId, photoUrl, note);
-    }
   };
 
   const handleMarkAbsentQuick = async (sessionId: string, note?: string) => {
+    if (!user) throw new Error("Authentication required.");
     const nowIso = new Date().toISOString();
+    // 1. Authoritative write to Firestore FIRST:
+    if (auth.currentUser) {
+      await markSessionAbsent(user.uid, sessionId, note);
+    }
+    // 2. Reconcile UI only after cloud confirmation:
     setSessions((prev) =>
       prev.map((s) =>
         s.id === sessionId
@@ -4749,9 +4789,6 @@ export default function App() {
       finalizedAt: nowIso,
       ...(note !== undefined ? { note } : {}),
     });
-    if (user && auth.currentUser) {
-      await markSessionAbsent(user.uid, sessionId, note);
-    }
   };
 
   const handleFreezeClassQuick = async (sessionId: string) => {

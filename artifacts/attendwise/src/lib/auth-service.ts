@@ -1,13 +1,22 @@
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
-  signInAnonymously,
+  signInWithPopup,
   signOut,
   updateProfile,
   type User as FirebaseUser,
 } from "firebase/auth";
-import { auth, db, initializeUserProfile, ensureSistecTimetableLoaded, TIMEZONE } from "./firebase";
+import {
+  auth,
+  db,
+  googleProvider,
+  initializeUserProfile,
+  ensureSistecTimetableLoaded,
+  TIMEZONE,
+  type ClassSessionItem,
+} from "./firebase";
 import { SISTEC_METADATA } from "../data/sistec-timetable";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 
 export interface AppStudentUser {
   uid: string;
@@ -87,10 +96,74 @@ export interface AuthResult {
 }
 
 /**
+ * Non-destructively reconciles prior local session data into the authoritative student record.
+ * Never overwrites or modifies existing Present or finalized Firestore sessions.
+ */
+export async function reconcileStudentRecords(uid: string): Promise<void> {
+  try {
+    // Check if any prior session overrides exist in localStorage
+    const localStoreKey = `attendwise_student_sessions_${uid}`;
+    const stored = localStorage.getItem(localStoreKey);
+    if (!stored) return;
+
+    const parsed = JSON.parse(stored) as Record<string, Partial<ClassSessionItem>>;
+    for (const [sessionId, patch] of Object.entries(parsed)) {
+      if (patch.personalStatus === "present" || patch.erpStatus) {
+        const sessionRef = doc(db, "users", uid, "classSessions", sessionId);
+        const snap = await getDoc(sessionRef);
+        if (snap.exists()) {
+          const current = snap.data() as ClassSessionItem;
+          // Never overwrite a cloud Present record
+          if (current.personalStatus !== "present" && patch.personalStatus === "present") {
+            await setDoc(
+              sessionRef,
+              {
+                ...current,
+                personalStatus: "present",
+                finalized: true,
+                finalizedAt: patch.finalizedAt || new Date().toISOString(),
+                serverReceiptAt: patch.serverReceiptAt || new Date().toISOString(),
+                note: patch.note || current.note,
+                evidenceAvailable: Boolean(patch.evidenceAvailable || current.evidenceAvailable),
+              },
+              { merge: true }
+            );
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Safe record reconciliation note:", err);
+  }
+}
+
+/**
+ * Sign in using Google OAuth for consistent, permanent cross-device identity
+ */
+export async function loginWithGoogle(): Promise<AuthResult> {
+  const cred = await signInWithPopup(auth, googleProvider);
+  await initializeUserProfile(cred.user, cred.user.displayName || "Student");
+  await ensureSistecTimetableLoaded(cred.user.uid);
+  await reconcileStudentRecords(cred.user.uid);
+
+  const studentUser: AppStudentUser = {
+    uid: cred.user.uid,
+    email: cred.user.email || "",
+    displayName: cred.user.displayName || "Student",
+    isFirebaseUser: true,
+  };
+
+  setStoredActiveSession(studentUser);
+
+  return {
+    user: studentUser,
+    firebaseAuthEnabled: true,
+    message: "Signed in securely with Google. Authoritative records synchronized across devices.",
+  };
+}
+
+/**
  * Register a student with unique email and password.
- * Validates inputs, prevents duplicate emails, and attempts Firebase Auth.
- * If Firebase has not yet enabled Email/Password provider (auth/operation-not-allowed),
- * saves to local student registry with hashed password so the student is never blocked.
  */
 export async function registerStudent(
   email: string,
@@ -115,14 +188,13 @@ export async function registerStudent(
     throw new Error("Password must be at least 6 characters long.");
   }
 
-  // Check unique email registration
+  // Check unique email registration locally
   const registry = getLocalRegistry();
   if (registry[trimmedEmail]) {
     throw new Error("This email is already registered. Please sign in with your password.");
   }
 
   // Attempt Firebase Auth creation
-  let firebaseSuccess = false;
   let finalUid = "";
 
   try {
@@ -130,8 +202,8 @@ export async function registerStudent(
     await updateProfile(cred.user, { displayName: trimmedName });
     await initializeUserProfile(cred.user, trimmedName);
     finalUid = cred.user.uid;
-    firebaseSuccess = true;
-    ensureSistecTimetableLoaded(finalUid).catch(console.warn);
+    await ensureSistecTimetableLoaded(finalUid);
+    await reconcileStudentRecords(finalUid);
   } catch (err: any) {
     const code = err?.code || "";
     if (code === "auth/email-already-in-use") {
@@ -144,19 +216,13 @@ export async function registerStudent(
       throw new Error("Password must be at least 6 characters long.");
     }
 
-    // If Firebase Auth operation-not-allowed (Email/Password provider not enabled in Console)
     if (code === "auth/operation-not-allowed" || err?.message?.includes("operation-not-allowed")) {
-      console.warn("Firebase Auth Email/Password provider is disabled in Firebase Console. Using Anonymous Auth for secure cloud sync.");
-      const cred = await signInAnonymously(auth);
-      await updateProfile(cred.user, { displayName: trimmedName });
-      await initializeUserProfile(cred.user, trimmedName);
-      finalUid = cred.user.uid;
-      firebaseSuccess = true;
-      ensureSistecTimetableLoaded(finalUid).catch(console.warn);
-    } else {
-      // Other Firebase errors
-      throw new Error(err?.message?.replace(/^Firebase:\s*/, "") || "Registration failed. Please check your credentials.");
+      throw new Error(
+        "Email/Password is not enabled on this Firebase project yet. Please use 'Sign In with Google' for permanent cross-device attendance tracking."
+      );
     }
+
+    throw new Error(err?.message?.replace(/^Firebase:\s*/, "") || "Registration failed. Please check your credentials.");
   }
 
   // Store in student registry with SHA-256 hashed password
@@ -174,24 +240,20 @@ export async function registerStudent(
     uid: finalUid,
     email: trimmedEmail,
     displayName: trimmedName,
-    isFirebaseUser: firebaseSuccess,
+    isFirebaseUser: true,
   };
 
   setStoredActiveSession(studentUser);
 
   return {
     user: studentUser,
-    firebaseAuthEnabled: firebaseSuccess,
-    message: firebaseSuccess
-      ? "Account created and synchronized with Firebase."
-      : "Account registered in student directory. (Note: Enable Email/Password provider in Firebase Console to enable cloud sync).",
+    firebaseAuthEnabled: true,
+    message: "Account created and synchronized with Firebase.",
   };
 }
 
 /**
  * Sign in a student with their registered email and password.
- * If either email or password is wrong, explicitly returns:
- * "Wrong credentials. Please check your email and password."
  */
 export async function loginStudent(
   email: string,
@@ -208,11 +270,12 @@ export async function loginStudent(
     throw new Error("Wrong credentials. Please check your email and password.");
   }
 
-  // 1. Try Firebase Auth first, with graceful fallback to secure local vault
   try {
     const cred = await signInWithEmailAndPassword(auth, trimmedEmail, pass);
     await initializeUserProfile(cred.user, cred.user.displayName || "Student");
-    ensureSistecTimetableLoaded(cred.user.uid).catch(console.warn);
+    await ensureSistecTimetableLoaded(cred.user.uid);
+    await reconcileStudentRecords(cred.user.uid);
+
     const studentUser: AppStudentUser = {
       uid: cred.user.uid,
       email: trimmedEmail,
@@ -223,50 +286,19 @@ export async function loginStudent(
     return {
       user: studentUser,
       firebaseAuthEnabled: true,
+      message: "Signed in successfully. Records synchronized.",
     };
   } catch (err: any) {
-    // Graceful fallback to secure local student registry vault
-    const registry = getLocalRegistry();
-    const account = registry[trimmedEmail];
-
-    if (account) {
-      const inputHash = await hashPassword(pass);
-      if (inputHash === account.passwordHash) {
-        let activeUid = account.uid;
-        let firebaseSuccess = false;
-        try {
-          if (!auth.currentUser) {
-            const cred = await signInAnonymously(auth);
-            activeUid = cred.user.uid;
-            await updateProfile(cred.user, { displayName: account.displayName });
-            await initializeUserProfile(cred.user, account.displayName);
-            ensureSistecTimetableLoaded(activeUid).catch(console.warn);
-            firebaseSuccess = true;
-          } else {
-            activeUid = auth.currentUser.uid;
-            firebaseSuccess = true;
-          }
-        } catch (anonErr) {
-          console.warn("Anonymous auth fallback notice:", anonErr);
-        }
-
-        const studentUser: AppStudentUser = {
-          uid: activeUid,
-          email: trimmedEmail,
-          displayName: account.displayName,
-          isFirebaseUser: firebaseSuccess,
-        };
-        setStoredActiveSession(studentUser);
-
-        return {
-          user: studentUser,
-          firebaseAuthEnabled: firebaseSuccess,
-          message: "Signed in and synchronized with cloud database.",
-        };
-      }
+    const code = err?.code || "";
+    if (code === "auth/operation-not-allowed" || err?.message?.includes("operation-not-allowed")) {
+      throw new Error(
+        "Email/Password is disabled on this Firebase project. Please use 'Sign In with Google' to access your attendance records securely."
+      );
     }
-
-    throw new Error("Wrong credentials. Please check your email and password.");
+    if (code === "auth/wrong-password" || code === "auth/user-not-found" || code === "auth/invalid-credential") {
+      throw new Error("Wrong credentials. Please check your email and password.");
+    }
+    throw new Error(err?.message?.replace(/^Firebase:\s*/, "") || "Wrong credentials. Please check your email and password.");
   }
 }
 

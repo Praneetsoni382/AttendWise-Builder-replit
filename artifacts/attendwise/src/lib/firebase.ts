@@ -12,9 +12,7 @@ import {
   type User,
 } from "firebase/auth";
 import {
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+  getFirestore,
   doc,
   collection,
   getDoc,
@@ -56,18 +54,10 @@ import {
   BTECH_3RD_TEACHING_DAYS,
 } from "../data/sistec-calendar";
 
-// Initialize Firebase with IndexedDB persistent local cache to prevent quota exhaustion
+// Initialize Firebase App and Firestore with explicit database ID
 const app = getApps().length > 0 ? getApps()[0]! : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = initializeFirestore(
-  app,
-  {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager(),
-    }),
-  },
-  firebaseConfig.firestoreDatabaseId
-);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const storage = getStorage(app, firebaseConfig.storageBucket);
 export const googleProvider = new GoogleAuthProvider();
 
