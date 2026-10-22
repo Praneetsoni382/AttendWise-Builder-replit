@@ -139,7 +139,7 @@ import {
   addDoc,
   setDoc,
 } from "firebase/firestore";
-import type { User as FirebaseUser } from "firebase/auth";
+import { signInAnonymously, type User as FirebaseUser } from "firebase/auth";
 
 export type AppUser = FirebaseUser | AppStudentUser;
 
@@ -4715,10 +4715,11 @@ export default function App() {
   // Authoritative cloud-confirmed action handlers (strictly non-optimistic)
   const handleRecordErp = async (sessionId: string, status: "Present" | "Absent") => {
     if (!user) throw new Error("Authentication required.");
-    // 1. Authoritative write to Firestore FIRST:
-    if (auth.currentUser) {
-      await recordSessionErpStatus(user.uid, sessionId, status);
+    if (!auth.currentUser) {
+      await signInAnonymously(auth);
     }
+    // 1. Authoritative write to Firestore FIRST:
+    await recordSessionErpStatus(user.uid, sessionId, status);
     // 2. State update ONLY after database write succeeds:
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, erpStatus: status } : s))
@@ -4729,10 +4730,11 @@ export default function App() {
   const handleMarkPresentQuick = async (sessionId: string, photoUrl?: string, note?: string) => {
     if (!user) throw new Error("Authentication required.");
     const nowIso = new Date().toISOString();
-    // 1. Authoritative write to Firestore FIRST (guarantees atomic locking & receipt):
-    if (auth.currentUser) {
-      await markSessionPresent(user.uid, sessionId, photoUrl, note);
+    if (!auth.currentUser) {
+      await signInAnonymously(auth);
     }
+    // 1. Authoritative write to Firestore FIRST (guarantees atomic locking & receipt):
+    await markSessionPresent(user.uid, sessionId, photoUrl, note);
     // 2. Reconcile UI only after cloud confirmation:
     setSessions((prev) =>
       prev.map((s) =>
@@ -4763,10 +4765,11 @@ export default function App() {
   const handleMarkAbsentQuick = async (sessionId: string, note?: string) => {
     if (!user) throw new Error("Authentication required.");
     const nowIso = new Date().toISOString();
-    // 1. Authoritative write to Firestore FIRST:
-    if (auth.currentUser) {
-      await markSessionAbsent(user.uid, sessionId, note);
+    if (!auth.currentUser) {
+      await signInAnonymously(auth);
     }
+    // 1. Authoritative write to Firestore FIRST:
+    await markSessionAbsent(user.uid, sessionId, note);
     // 2. Reconcile UI only after cloud confirmation:
     setSessions((prev) =>
       prev.map((s) =>
@@ -4817,6 +4820,9 @@ export default function App() {
     });
     // 2. Persist to Firestore / IndexedDB cache
     if (user) {
+      if (!auth.currentUser) {
+        await signInAnonymously(auth);
+      }
       await freezeClassSession(user.uid, sessionId);
     }
   };

@@ -687,6 +687,57 @@ export function buildDefaultSistecData(uid: string): {
   };
   subjects.push(pythonSubjectItem);
 
+  // Add Testing Class subject for today's testing
+  const testingSubjectItem: SubjectItem = {
+    id: "sub-testing-class",
+    studentId: uid,
+    code: "TST-307",
+    name: "Testing Class",
+    category: "Theory",
+    teacherName: "Testing Faculty",
+    iconKey: "terminal",
+    reviewNeeded: false,
+    notes: "Temporary testing class for today only (5:00 PM - 7:00 PM IST)",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  subjects.push(testingSubjectItem);
+
+  // Add Testing Class session for today only (Slot P7, 17:00 - 19:00 IST)
+  const todayKey = formatDateKey(new Date());
+  const testingSessionId = `session-testing-class-${todayKey}`;
+  const testStartAt = makeIstDateTime(todayKey, "17:00");
+  const testEndAt = makeIstDateTime(todayKey, "19:00");
+  const isTestOverdue = now.getTime() >= testEndAt.getTime();
+  const testInitialStatus = isTestOverdue ? "absent" : "unmarked";
+
+  sessions.push({
+    id: testingSessionId,
+    studentId: uid,
+    subjectId: "sub-testing-class",
+    subjectName: "Testing Class",
+    subjectCode: "TST-307",
+    timetableEntryId: null,
+    slot: "P7",
+    scheduledDate: todayKey,
+    scheduledStartAt: testStartAt.toISOString(),
+    scheduledEndAt: testEndAt.toISOString(),
+    category: "Theory",
+    room: "Testing Lab",
+    personalStatus: testInitialStatus,
+    erpStatus: null,
+    note: null,
+    canMarkPresent: true,
+    finalized: isTestOverdue,
+    finalizedAt: isTestOverdue ? testEndAt.toISOString() : null,
+    serverReceiptAt: null,
+    clientCaptureAt: null,
+    cancelledAt: null,
+    evidenceAvailable: false,
+    academicDayNumber: BTECH_3RD_TEACHING_DAYS[todayKey] ?? 1,
+    createdAt: now.toISOString(),
+  });
+
   // Add exactly 66 historical Python Training class sessions (11 days * 6 periods)
   let pyDayNum = 1;
   for (const dateKey of PYTHON_TRAINING_DATES) {
@@ -829,6 +880,62 @@ export async function generateWeeklySessions(uid: string): Promise<void> {
           await commitBatch();
         }
       }
+    }
+
+    // Also ensure Testing Class subject exists for today's testing
+    const testingSubRef = doc(db, "users", uid, "subjects", "sub-testing-class");
+    batch.set(testingSubRef, {
+      id: "sub-testing-class",
+      studentId: uid,
+      code: "TST-307",
+      name: "Testing Class",
+      category: "Theory",
+      teacherName: "Testing Faculty",
+      iconKey: "terminal",
+      reviewNeeded: false,
+      notes: "Temporary testing class for today only (5:00 PM - 7:00 PM IST)",
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    }, { merge: true });
+    opCount++;
+
+    // Inject Testing Class session for today (Slot P7, 17:00 - 19:00 IST)
+    const todayKey = formatDateKey(new Date());
+    const testingSessionId = `session-testing-class-${todayKey}`;
+    if (!existingDateIds.has(testingSessionId) && isTeachingDay(todayKey)) {
+      const sessionDocRef = doc(db, "users", uid, "classSessions", testingSessionId);
+      const testStartAt = makeIstDateTime(todayKey, "17:00");
+      const testEndAt = makeIstDateTime(todayKey, "19:00");
+      const isTestOverdue = now.getTime() >= testEndAt.getTime();
+      const testInitialStatus = isTestOverdue ? "absent" : "unmarked";
+
+      batch.set(sessionDocRef, {
+        id: testingSessionId,
+        studentId: uid,
+        subjectId: "sub-testing-class",
+        subjectName: "Testing Class",
+        subjectCode: "TST-307",
+        timetableEntryId: null,
+        slot: "P7",
+        scheduledDate: todayKey,
+        scheduledStartAt: testStartAt.toISOString(),
+        scheduledEndAt: testEndAt.toISOString(),
+        category: "Theory",
+        room: "Testing Lab",
+        personalStatus: testInitialStatus,
+        erpStatus: null,
+        note: null,
+        canMarkPresent: true,
+        finalized: isTestOverdue,
+        finalizedAt: isTestOverdue ? testEndAt.toISOString() : null,
+        serverReceiptAt: null,
+        clientCaptureAt: null,
+        cancelledAt: null,
+        evidenceAvailable: false,
+        academicDayNumber: BTECH_3RD_TEACHING_DAYS[todayKey] ?? 1,
+        createdAt: now.toISOString(),
+      });
+      opCount++;
     }
 
     await commitBatch();
