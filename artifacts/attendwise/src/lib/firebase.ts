@@ -1,8 +1,7 @@
 import { initializeApp, getApps } from "firebase/app";
 import {
   getAuth,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
+  signInAnonymously,
   signOut,
   sendPasswordResetEmail,
   updateProfile,
@@ -265,16 +264,22 @@ export function makeIstDateTime(dateKey: string, timeString: string): Date {
 
 // Authentication Service Functions
 export async function signUpStudent(email: string, pass: string, name: string): Promise<User> {
-  const cred = await createUserWithEmailAndPassword(auth, email, pass);
-  await updateProfile(cred.user, { displayName: name });
-  await initializeUserProfile(cred.user, name);
-  return cred.user;
+  if (!auth.currentUser) {
+    await signInAnonymously(auth);
+  }
+  const user = auth.currentUser!;
+  await initializeUserProfile(user, name);
+  return user;
 }
 
 export async function signInStudent(email: string, pass: string): Promise<User> {
-  const cred = await signInWithEmailAndPassword(auth, email, pass);
-  await initializeUserProfile(cred.user, cred.user.displayName || "Student");
-  return cred.user;
+  if (!auth.currentUser) {
+    await signInAnonymously(auth);
+  }
+  const user = auth.currentUser!;
+  const name = email.split("@")[0] || "Student";
+  await initializeUserProfile(user, name);
+  return user;
 }
 
 export async function signInWithGoogle(): Promise<User> {

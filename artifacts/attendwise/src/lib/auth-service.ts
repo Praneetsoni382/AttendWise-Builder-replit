@@ -1,9 +1,6 @@
 import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
   signInAnonymously,
   signOut,
-  updateProfile,
   type User as FirebaseUser,
 } from "firebase/auth";
 import {
@@ -176,22 +173,6 @@ export async function registerStudent(
     }
   } catch (anonErr) {
     console.warn("Anonymous auth notice:", anonErr);
-  }
-
-  try {
-    const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, pass);
-    await updateProfile(cred.user, { displayName: trimmedName });
-  } catch (err: any) {
-    const code = err?.code || "";
-    if (code === "auth/email-already-in-use") {
-      throw new Error("This email is already registered. Please sign in with your password.");
-    }
-    if (code === "auth/invalid-email") {
-      throw new Error("Please enter a valid college email address.");
-    }
-    if (code === "auth/weak-password") {
-      throw new Error("Password must be at least 6 characters long.");
-    }
   }
 
   try {
